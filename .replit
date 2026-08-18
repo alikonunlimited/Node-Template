@@ -1,20 +1,12 @@
-modules = ["nodejs-24"]
+run = "node main.js"
+
+[nix]
+channel = "stable-24_05"
 
 [deployment]
-router = "application"
-deploymentTarget = "autoscale"
+run = ["sh", "-c", "node main.js"]
+deploymentTarget = "cloudrun"
 
-[deployment.postBuild]
-args = ["pnpm", "store", "prune"]
-env = { "CI" = "true" }
-
-[workflows]
-runButton = "Project"
-
-[agent]
-stack = "PNPM_WORKSPACE"
-expertMode = true
-
-[postMerge]
-path = "scripts/post-merge.sh"
-timeoutMs = 20000
+[[ports]]
+localPort = 3000
+externalPort = 80
