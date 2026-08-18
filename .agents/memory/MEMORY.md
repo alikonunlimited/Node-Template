@@ -1,0 +1,1 @@
+- [Node app at workspace root](node-root-workspace.md) — standalone Node dependencies may require a normal workspace install because root package additions are guarded.
