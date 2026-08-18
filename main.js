@@ -1,6 +1,4 @@
 'use strict';
-
-// ── Load env (Replit uses Secrets tab, but dotenv works as fallback) ──────────
 require('dotenv').config();
 
 const express  = require('express');
@@ -9,6 +7,7 @@ const path     = require('path');
 const fetch    = require('node-fetch');
 const { fetchLivePrice, pushPrice, getHistory, computeIndicators, decide } = require('./engine');
 const { ensureHeaders, logTrade, logDailySummary } = require('./sheets');
+const { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -18,7 +17,7 @@ const ANALYSIS_INTERVAL_SEC = parseInt(process.env.ANALYSIS_INTERVAL_SECONDS || 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── TRADER STATE ──────────────────────────────────────────────────────────────
+// ── STATE ─────────────────────────────────────────────────────────────────────
 const state = {
   balance:       STARTING_BALANCE,
   trades:        [],
@@ -31,6 +30,7 @@ const state = {
   startedAt:     new Date().toISOString(),
   lastAnalysis:  null,
   keepAliveHits: 0,
+  dbConnected:   false,
 };
 
 function addLog(msg, type = 'info') {
@@ -71,12 +71,18 @@ async function closePosition(price, reason) {
   state.equityHistory.push(state.balance);
   state.openTrade = null;
 
-  if (reason === 'TP')     state.stats.tpHits++;
+  if (reason === 'TP')      state.stats.tpHits++;
   else if (reason === 'SL') state.stats.slHits++;
   else                      state.stats.manualCloses++;
 
   addLog(`EXIT ${closed.type.toUpperCase()} @ $${price} | ${reason} | P&L: ${pl>=0?'+':''}$${pl}`, isWin ? 'win' : 'loss');
-  await logTrade(closed);
+
+  // Save to DB + Sheets in parallel
+  await Promise.all([
+    saveTrade(closed),
+    saveEquity(state.balance),
+    logTrade(closed),
+  ]);
 }
 
 // ── PRICE TICK ────────────────────────────────────────────────────────────────
@@ -102,7 +108,6 @@ async function priceTick() {
 async function analysisCycle() {
   try {
     await priceTick();
-
     const price      = state.currentPrice;
     const history    = getHistory();
     const indicators = computeIndicators(price, history);
@@ -129,37 +134,22 @@ async function analysisCycle() {
   }
 }
 
-// ── KEEP-ALIVE (critical for Replit free tier) ────────────────────────────────
-// Replit sleeps inactive repls after ~1 hour on the free tier.
-// This self-ping every 4 minutes prevents that.
+// ── KEEP-ALIVE ────────────────────────────────────────────────────────────────
 function startKeepAlive() {
-  // We need the public Replit URL — it's set as REPL_SLUG + REPL_OWNER env vars
-  const replSlug  = process.env.REPL_SLUG;
-  const replOwner = process.env.REPL_OWNER;
+  const pingUrl = process.env.PUBLIC_URL
+    ? `${process.env.PUBLIC_URL}/health`
+    : null;
 
-  let pingUrl = null;
-  if (replSlug && replOwner) {
-    pingUrl = `https://${replSlug}.${replOwner}.repl.co/health`;
-  } else if (process.env.PUBLIC_URL) {
-    pingUrl = `${process.env.PUBLIC_URL}/health`;
-  }
-
-  if (!pingUrl) {
-    console.log('[KeepAlive] No public URL found — add PUBLIC_URL secret if repl sleeps');
-    return;
-  }
-
-  console.log(`[KeepAlive] Pinging ${pingUrl} every 4 minutes`);
-
+  if (!pingUrl) return;
+  console.log(`[KeepAlive] Pinging ${pingUrl} every 4 min`);
   setInterval(async () => {
     try {
-      const r = await fetch(pingUrl, { timeout: 10000 });
+      await fetch(pingUrl, { timeout: 10000 });
       state.keepAliveHits++;
-      console.log(`[KeepAlive] Ping #${state.keepAliveHits} → ${r.status}`);
     } catch (e) {
       console.warn(`[KeepAlive] Ping failed: ${e.message}`);
     }
-  }, 4 * 60 * 1000); // every 4 minutes
+  }, 4 * 60 * 1000);
 }
 
 // ── COMPUTED STATS ────────────────────────────────────────────────────────────
@@ -218,6 +208,7 @@ app.get('/api/state', (req, res) => {
     startedAt:     state.startedAt,
     tradeCount:    state.trades.length,
     keepAliveHits: state.keepAliveHits,
+    dbConnected:   state.dbConnected,
   });
 });
 
@@ -234,32 +225,63 @@ app.post('/api/close', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Health endpoint — also used by keep-alive ping
 app.get('/health', (req, res) => {
-  res.json({
-    ok:        true,
-    uptime:    process.uptime(),
-    trades:    state.trades.length,
-    balance:   state.balance,
-    keepAlive: state.keepAliveHits,
-  });
+  res.json({ ok: true, uptime: process.uptime(), trades: state.trades.length, balance: state.balance, dbConnected: state.dbConnected });
 });
 
-// ── CRON: Daily summary at midnight UTC ──────────────────────────────────────
+// ── CRON: Daily summary midnight UTC ─────────────────────────────────────────
 cron.schedule('0 0 * * *', async () => {
   addLog('Running midnight daily summary…', 'info');
-  await logDailySummary(state);
+  const t = state.trades;
+  if (!t.length) return;
+  const today = new Date().toLocaleDateString('en-US');
+  const todayTrades = t.filter(x => new Date(x.closeTime).toLocaleDateString('en-US') === today);
+  if (!todayTrades.length) return;
+
+  const wins   = todayTrades.filter(x => x.isWin);
+  const losses = todayTrades.filter(x => !x.isWin);
+  const pls    = todayTrades.map(x => x.pl);
+  const data   = {
+    date:    new Date().toISOString().split('T')[0],
+    trades:  todayTrades.length,
+    wins:    wins.length,
+    losses:  losses.length,
+    winRate: (wins.length / todayTrades.length * 100).toFixed(1),
+    grossPL: pls.reduce((a,b)=>a+b,0).toFixed(2),
+    balance: state.balance.toFixed(2),
+    avgWin:  wins.length ? (wins.reduce((a,x)=>a+x.pl,0)/wins.length).toFixed(2) : 0,
+    avgLoss: losses.length ? (losses.reduce((a,x)=>a+x.pl,0)/losses.length).toFixed(2) : 0,
+    best:    Math.max(...pls).toFixed(2),
+    worst:   Math.min(...pls).toFixed(2),
+  };
+
+  await Promise.all([saveDailySummary(data), logDailySummary(state)]);
 }, { timezone: 'UTC' });
 
 // ── START ─────────────────────────────────────────────────────────────────────
 async function start() {
   console.log('╔══════════════════════════════════════╗');
-  console.log('║  XAU/USD AI Trader — Replit Edition  ║');
+  console.log('║  XAU/USD AI Trader — Supabase + Render ║');
   console.log('╚══════════════════════════════════════╝');
 
-  // Start web server first so Replit's port check passes immediately
   app.listen(PORT, '0.0.0.0', async () => {
     console.log(`[Server] Running on port ${PORT}`);
+
+    // Init DB and load existing trade history
+    await initDB();
+    state.dbConnected = true;
+
+    const [savedTrades, savedEquity] = await Promise.all([loadTrades(), loadEquityHistory()]);
+
+    if (savedTrades.length) {
+      state.trades = savedTrades;
+      state.balance = savedTrades.reduce((a, t) => a + t.pl, STARTING_BALANCE);
+      addLog(`Loaded ${savedTrades.length} trades from database — balance $${state.balance.toFixed(2)}`, 'info');
+    }
+
+    if (savedEquity.length) {
+      state.equityHistory = [STARTING_BALANCE, ...savedEquity];
+    }
 
     await ensureHeaders();
 
@@ -267,16 +289,11 @@ async function start() {
     state.currentPrice = price;
     state.priceSource  = source;
     pushPrice(price);
-    addLog(`Started | $${price} from ${source}`, 'info');
+    addLog(`Started | $${price} from ${source} | ${savedTrades.length} trades restored from DB`, 'info');
 
-    // Price tick every 5s (TP/SL monitoring)
     setInterval(priceTick, 5000);
-
-    // AI analysis every N seconds
     setInterval(analysisCycle, ANALYSIS_INTERVAL_SEC * 1000);
-    analysisCycle(); // run immediately
-
-    // Keep-alive self-ping
+    analysisCycle();
     startKeepAlive();
   });
 }
