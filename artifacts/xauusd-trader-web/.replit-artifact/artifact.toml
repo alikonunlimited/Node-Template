@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "XAU/USD Trader Web"
+description = "A responsive web dashboard for monitoring a simulated XAU/USD trader, including live price status, account metrics, AI decisions, open positions, and trade history."
+version = "1.0.0"
+id = "artifacts/xauusd-trader-web"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24849
+
+[services.development]
+run = "pnpm --filter @workspace/xauusd-trader-web run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/xauusd-trader-web", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/xauusd-trader-web/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24849"
+BASE_PATH = "/"
