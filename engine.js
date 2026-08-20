@@ -1,19 +1,26 @@
 'use strict';
 
-// ── YOUR HISTORICAL PATTERNS (from uploaded CSV analysis) ─────────────────────
+// ── YOUR HISTORICAL PATTERNS ──────────────────────────────────────────────────
 const YOUR_PATTERNS = {
-  winRate:        0.24,
-  bestHoursUTC:   [1, 5, 15],
-  worstHoursUTC:  [2, 3, 4, 16, 19],
-  avgWinDuration: 986,   // minutes
-  avgLossDuration:180,
+  winRate:          0.24,
+  bestHoursUTC:     [1, 5, 15],
+  worstHoursUTC:    [2, 3, 4, 16, 19],
   breakEvenWinRate: 0.37,
-  dominantMistake: 'buy_into_downtrend',
-  bestLotSize:    0.01,
+  dominantMistake:  'buy_into_downtrend',
 };
 
-// ── PRICE HISTORY STORE ───────────────────────────────────────────────────────
-const MAX_HISTORY = 500;
+// ── ANTI-MARTINGALE LOT SIZING ────────────────────────────────────────────────
+// Increase lots on consecutive wins, reset to base on any loss
+const LOT_PROGRESSION = [0.01, 0.02, 0.04, 0.08, 0.16, 0.32];
+const BASE_LOT = 0.01;
+
+function getLotSize(consecutiveWins) {
+  const idx = Math.min(consecutiveWins, LOT_PROGRESSION.length - 1);
+  return LOT_PROGRESSION[idx];
+}
+
+// ── PRICE HISTORY ─────────────────────────────────────────────────────────────
+const MAX_HISTORY = 1000;
 let priceHistory  = [];
 let lastKnownPrice = 4351;
 
@@ -28,7 +35,6 @@ function getHistory() { return [...priceHistory]; }
 const fetch = require('node-fetch');
 
 async function fetchLivePrice() {
-  // Source 1: goldprice.org
   try {
     const r = await fetch('https://data-asg.goldprice.org/dbXRates/USD',
       { headers: { Accept: 'application/json' }, timeout: 5000 });
@@ -39,7 +45,6 @@ async function fetchLivePrice() {
     }
   } catch (_) {}
 
-  // Source 2: frankfurter
   try {
     const r = await fetch('https://api.frankfurter.app/latest?from=XAU&to=USD', { timeout: 5000 });
     if (r.ok) {
@@ -49,31 +54,34 @@ async function fetchLivePrice() {
     }
   } catch (_) {}
 
-  // Fallback: simulate drift
   const drift = (Math.random() - 0.48) * 0.8;
   const p = parseFloat((lastKnownPrice + drift).toFixed(2));
   return { price: p, source: 'simulated' };
 }
 
 // ── INDICATOR ENGINE ──────────────────────────────────────────────────────────
-function computeIndicators(price, history) {
+function computeIndicators(price, history, timeframe = 'scalp') {
   const len = history.length;
   if (len < 10) return null;
 
   const slice = (n) => history.slice(-Math.min(n, len));
+  const avg   = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
 
-  const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+  // Timeframe-specific periods
+  const periods = timeframe === 'swing'
+    ? { rsi: 21, stoch: 21, fast: 21, slow: 50, trend: 50 }
+    : { rsi: 14, stoch: 14, fast: 9,  slow: 21, trend: 21 };
 
-  const ma5  = avg(slice(5));
-  const ma14 = avg(slice(14));
-  const ma21 = avg(slice(21));
-  const ma50 = avg(slice(50));
+  const ma_fast  = avg(slice(periods.fast));
+  const ma_slow  = avg(slice(periods.slow));
+  const ma_trend = avg(slice(periods.trend));
+  const ma200    = avg(slice(Math.min(200, len)));
 
   // RSI
-  const r14 = slice(14);
+  const r = slice(periods.rsi);
   let gains = 0, losses = 0, gc = 0, lc = 0;
-  for (let i = 1; i < r14.length; i++) {
-    const d = r14[i] - r14[i - 1];
+  for (let i = 1; i < r.length; i++) {
+    const d = r[i] - r[i - 1];
     if (d > 0) { gains += d; gc++; } else { losses += Math.abs(d); lc++; }
   }
   const avgG = gc ? gains / gc : 0;
@@ -81,39 +89,49 @@ function computeIndicators(price, history) {
   const rsi  = 100 - (100 / (1 + avgG / avgL));
 
   // Stochastic
-  const hi14 = Math.max(...slice(14));
-  const lo14 = Math.min(...slice(14));
-  const stoch = hi14 !== lo14 ? ((price - lo14) / (hi14 - lo14)) * 100 : 50;
+  const st   = slice(periods.stoch);
+  const hi   = Math.max(...st);
+  const lo   = Math.min(...st);
+  const stoch = hi !== lo ? ((price - lo) / (hi - lo)) * 100 : 50;
 
-  // MACD approx
-  const ema12 = avg(slice(12));
-  const ema26 = avg(slice(Math.min(26, len)));
-  const macd  = ema12 - ema26;
+  // MACD
+  const emaF = avg(slice(Math.min(12, len)));
+  const emaS = avg(slice(Math.min(26, len)));
+  const macd = emaF - emaS;
 
   // Momentum
-  const momentum = len >= 10 ? price - history[len - 10] : 0;
+  const lookback = timeframe === 'swing' ? 20 : 10;
+  const momentum = len >= lookback ? price - history[len - lookback] : 0;
 
-  // Volatility (avg abs move per tick)
-  const s14 = slice(14);
+  // Volatility
+  const s14  = slice(14);
   const diffs = s14.slice(1).map((v, i) => Math.abs(v - s14[i]));
-  const vol = avg(diffs);
+  const vol   = avg(diffs);
+
+  // Bollinger Bands
+  const bb_slice = slice(20);
+  const bb_avg   = avg(bb_slice);
+  const bb_std   = Math.sqrt(bb_slice.reduce((a, v) => a + Math.pow(v - bb_avg, 2), 0) / bb_slice.length);
+  const bb_upper = bb_avg + 2 * bb_std;
+  const bb_lower = bb_avg - 2 * bb_std;
+  const bb_pos   = price > bb_upper ? 'upper' : price < bb_lower ? 'lower' : 'mid';
 
   return {
     rsi, stoch, macd, momentum, vol,
-    ma5, ma14, ma21, ma50,
-    trend:     price > ma14 ? 'bull' : 'bear',
-    ema_align: ma5 > ma14 && ma14 > ma21,
-    golden_cross: ma50 > 0 && ma14 > ma50,
+    ma_fast, ma_slow, ma_trend, ma200,
+    bb_upper, bb_lower, bb_pos,
+    trend:      price > ma_trend ? 'bull' : 'bear',
+    ema_align:  ma_fast > ma_slow && ma_slow > ma_trend,
+    golden_cross: ma_slow > ma200,
+    timeframe,
   };
 }
 
-// ── AI DECISION ENGINE ────────────────────────────────────────────────────────
-function decide(price, indicators, hourUTC) {
-  if (!indicators) {
-    return { action: 'wait', reason: 'Building price history…', confidence: 0, bullScore: 0, bearScore: 0 };
-  }
+// ── SCALP DECISION (M5–M15 style) ────────────────────────────────────────────
+function decideScalp(price, indicators, hourUTC, consecutiveWins) {
+  if (!indicators) return { action: 'wait', reason: 'Building history…', confidence: 0, bullScore: 0, bearScore: 0 };
 
-  const { rsi, stoch, macd, momentum, trend, ema_align, vol } = indicators;
+  const { rsi, stoch, macd, momentum, trend, ema_align, vol, bb_pos } = indicators;
   const isBest  = YOUR_PATTERNS.bestHoursUTC.includes(hourUTC);
   const isWorst = YOUR_PATTERNS.worstHoursUTC.includes(hourUTC);
 
@@ -121,11 +139,11 @@ function decide(price, indicators, hourUTC) {
   const log = [];
 
   // RSI
-  if (rsi < 32)       { bull += 2.5; log.push(`RSI oversold ${rsi.toFixed(1)}`); }
-  else if (rsi > 68)  { bear += 2.5; log.push(`RSI overbought ${rsi.toFixed(1)}`); }
+  if (rsi < 30)       { bull += 2.5; log.push(`RSI oversold ${rsi.toFixed(1)}`); }
+  else if (rsi > 70)  { bear += 2.5; log.push(`RSI overbought ${rsi.toFixed(1)}`); }
   else                { log.push(`RSI neutral ${rsi.toFixed(1)}`); }
 
-  // Stochastic
+  // Stoch
   if (stoch < 20)     { bull += 2; log.push('Stoch oversold'); }
   else if (stoch > 80){ bear += 2; log.push('Stoch overbought'); }
 
@@ -133,54 +151,142 @@ function decide(price, indicators, hourUTC) {
   if (macd > 0.5)     { bull += 1.5; log.push('MACD bull'); }
   else if (macd < -0.5){ bear += 1.5; log.push('MACD bear'); }
 
-  // EMA alignment
-  if (ema_align)      { bull += 2; log.push('EMA aligned bull'); }
+  // EMA
+  if (ema_align)      { bull += 2; log.push('EMA bull align'); }
   else                { bear += 1; log.push('EMA misaligned'); }
 
+  // Bollinger
+  if (bb_pos === 'lower') { bull += 1.5; log.push('At BB lower — bounce potential'); }
+  if (bb_pos === 'upper') { bear += 1.5; log.push('At BB upper — rejection potential'); }
+
   // Momentum
-  if (momentum > 3)   { bull += 1; log.push('Momentum up'); }
-  else if (momentum < -3){ bear += 1; log.push('Momentum down'); }
+  if (momentum > 2)   { bull += 1; log.push('Momentum up'); }
+  else if (momentum < -2){ bear += 1; log.push('Momentum down'); }
 
-  // Your pattern corrections
-  if (isWorst)        { bull -= 2; bear -= 2; log.push(`⚠ Worst hour ${hourUTC}:00 UTC`); }
-  if (isBest)         { bull += 0.5; bear += 0.5; log.push(`✓ Best hour ${hourUTC}:00 UTC`); }
+  // Hour adjustments
+  if (isWorst) { bull -= 2; bear -= 2; log.push(`⚠ Worst hour ${hourUTC}:00`); }
+  if (isBest)  { bull += 1; bear += 1; log.push(`✓ Best hour ${hourUTC}:00`); }
 
-  // Key correction: avoid buying into downtrend (your #1 mistake)
+  // Avoid your #1 mistake
   if (trend === 'bear' && bull > bear) {
     bull -= 2;
-    log.push('Correction: trend bearish, reduced bull score');
+    log.push('Correction: trend bearish, reduced bull');
   }
 
-  const maxScore = 9;
-  const topScore = Math.max(bull, bear);
-  const confidence = Math.min(topScore / maxScore, 1);
-  const THRESHOLD = 0.44;
+  const confidence = Math.min(Math.max(bull, bear) / 9, 1);
+  const THRESHOLD  = 0.40; // lower threshold = more trades for scalping
+  const lots       = getLotSize(consecutiveWins);
 
   if (confidence < THRESHOLD) {
     return { action: 'wait', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear };
   }
 
-  const tp_dist = Math.max(vol * 10, 6);
-  const sl_dist = Math.max(vol * 5,  3);
+  // TP/SL tighter for scalps
+  const tp_dist = Math.max(vol * 6, 3.5);
+  const sl_dist = Math.max(vol * 3, 2.0);
 
-  if (bull >= bear && bull >= 4) {
+  if (bull >= bear && bull >= 3.5) {
     return {
-      action: 'buy', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear,
+      action: 'buy', tradeType: 'scalp', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear,
       tp: parseFloat((price + tp_dist).toFixed(2)),
       sl: parseFloat((price - sl_dist).toFixed(2)),
-      lots: YOUR_PATTERNS.bestLotSize,
+      lots,
     };
   }
-  if (bear > bull && bear >= 4) {
+  if (bear > bull && bear >= 3.5) {
     return {
-      action: 'sell', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear,
+      action: 'sell', tradeType: 'scalp', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear,
       tp: parseFloat((price - tp_dist).toFixed(2)),
       sl: parseFloat((price + sl_dist).toFixed(2)),
-      lots: YOUR_PATTERNS.bestLotSize,
+      lots,
     };
   }
 
   return { action: 'wait', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear };
 }
 
-module.exports = { fetchLivePrice, pushPrice, getHistory, computeIndicators, decide, YOUR_PATTERNS };
+// ── SWING DECISION (H1–H4 style) ─────────────────────────────────────────────
+function decideSwing(price, indicators, hourUTC, consecutiveWins) {
+  if (!indicators) return { action: 'wait', reason: 'Building history…', confidence: 0, bullScore: 0, bearScore: 0 };
+
+  const { rsi, stoch, macd, momentum, trend, ema_align, golden_cross, vol, bb_pos } = indicators;
+
+  let bull = 0, bear = 0;
+  const log = [];
+
+  // RSI — wider bands for swing
+  if (rsi < 40)       { bull += 2; log.push(`RSI ${rsi.toFixed(1)} bull zone`); }
+  else if (rsi > 60)  { bear += 2; log.push(`RSI ${rsi.toFixed(1)} bear zone`); }
+
+  // Stoch
+  if (stoch < 25)     { bull += 2; log.push('Stoch oversold'); }
+  else if (stoch > 75){ bear += 2; log.push('Stoch overbought'); }
+
+  // MACD
+  if (macd > 1)       { bull += 2; log.push('MACD strong bull'); }
+  else if (macd < -1) { bear += 2; log.push('MACD strong bear'); }
+
+  // EMA + Golden cross
+  if (ema_align)      { bull += 2.5; log.push('EMA bull align'); }
+  else                { bear += 1.5; log.push('EMA bear align'); }
+  if (golden_cross)   { bull += 1.5; log.push('Golden cross'); }
+  else                { bear += 1; log.push('Death cross'); }
+
+  // Bollinger mean reversion for swings
+  if (bb_pos === 'lower') { bull += 2; log.push('BB lower — swing long setup'); }
+  if (bb_pos === 'upper') { bear += 2; log.push('BB upper — swing short setup'); }
+
+  // Strong momentum confirms swing
+  if (momentum > 5)   { bull += 2; log.push('Strong upward momentum'); }
+  else if (momentum < -5){ bear += 2; log.push('Strong downward momentum'); }
+
+  // Avoid worst hours for swing entries too
+  if (YOUR_PATTERNS.worstHoursUTC.includes(hourUTC)) {
+    bull -= 1; bear -= 1;
+    log.push(`⚠ Avoid hour ${hourUTC}:00 for new entries`);
+  }
+
+  // Correct buy-into-downtrend
+  if (trend === 'bear' && bull > bear) {
+    bull -= 2;
+    log.push('Correction: macro trend bearish');
+  }
+
+  const confidence = Math.min(Math.max(bull, bear) / 12, 1);
+  const THRESHOLD  = 0.45; // higher threshold for swing — need stronger signal
+  const lots       = getLotSize(consecutiveWins);
+
+  if (confidence < THRESHOLD) {
+    return { action: 'wait', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear };
+  }
+
+  // TP/SL wider for swings
+  const tp_dist = Math.max(vol * 18, 12);
+  const sl_dist = Math.max(vol * 9,  6);
+
+  if (bull >= bear && bull >= 5) {
+    return {
+      action: 'buy', tradeType: 'swing', reason: '[SWING] ' + log.join(' · '), confidence, bullScore: bull, bearScore: bear,
+      tp: parseFloat((price + tp_dist).toFixed(2)),
+      sl: parseFloat((price - sl_dist).toFixed(2)),
+      lots,
+    };
+  }
+  if (bear > bull && bear >= 5) {
+    return {
+      action: 'sell', tradeType: 'swing', reason: '[SWING] ' + log.join(' · '), confidence, bullScore: bull, bearScore: bear,
+      tp: parseFloat((price - tp_dist).toFixed(2)),
+      sl: parseFloat((price + sl_dist).toFixed(2)),
+      lots,
+    };
+  }
+
+  return { action: 'wait', reason: log.join(' · '), confidence, bullScore: bull, bearScore: bear };
+}
+
+module.exports = {
+  fetchLivePrice, pushPrice, getHistory,
+  computeIndicators, decideScalp, decideSwing,
+  getLotSize, LOT_PROGRESSION, BASE_LOT,
+  YOUR_PATTERNS,
+};
