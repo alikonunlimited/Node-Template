@@ -22,7 +22,7 @@ function getLotSize(consecutiveWins) {
 // ── PRICE HISTORY ─────────────────────────────────────────────────────────────
 const MAX_HISTORY = 1000;
 let priceHistory  = [];
-let lastKnownPrice = 4351;
+let lastKnownPrice = 4424.88;
 
 function pushPrice(p) {
   priceHistory.push(p);
@@ -34,7 +34,43 @@ function getHistory() { return [...priceHistory]; }
 // ── LIVE PRICE FETCH ──────────────────────────────────────────────────────────
 const fetch = require('node-fetch');
 
-async function fetchLivePrice() {
+  async function fetchLivePrice() {
+    // SOURCE 1: OANDA real-time price
+    try {
+      const apiKey = process.env.OANDA_API_KEY;
+      if (apiKey) {
+        const r = await fetch(
+          'https://api-fxtrade.oanda.com/v3/instruments/XAU_USD/candles?count=1&granularity=S5&price=M',
+          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 5000 }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          const p = parseFloat(d?.candles?.[0]?.mid?.c);
+          if (p > 1800 && p < 7000) {
+            lastKnownPrice = p;
+            return { price: p, source: 'OANDA Live' };
+          }
+        }
+      }
+    } catch (_) {}
+
+    // SOURCE 2: goldprice.org fallback
+    try {
+      const r = await fetch('https://data-asg.goldprice.org/dbXRates/USD',
+        { headers: { Accept: 'application/json' }, timeout: 5000 });
+      if (r.ok) {
+        const d = await r.json();
+        const p = parseFloat(d?.items?.[0]?.xauPrice);
+        if (p > 1800 && p < 7000) { lastKnownPrice = p; return { price: p, source: 'goldprice.org' }; }
+      }
+    } catch (_) {}
+
+    // FALLBACK: simulate drift
+    const drift = (Math.random() - 0.48) * 0.8;
+    const p = parseFloat((lastKnownPrice + drift).toFixed(2));
+    return { price: p, source: 'simulated' };
+  }
+
   try {
     const r = await fetch('https://data-asg.goldprice.org/dbXRates/USD',
       { headers: { Accept: 'application/json' }, timeout: 5000 });
