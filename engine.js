@@ -23,7 +23,7 @@ const TRADE_TARGETS = {
 
 const MAX_HISTORY = 1000;
 let priceHistory = [];
-let lastKnownPrice = 4603;
+let lastKnownPrice = 4474;
 
 function pushPrice(p) {
   priceHistory.push(p);
