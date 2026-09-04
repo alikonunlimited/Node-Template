@@ -23,7 +23,8 @@ const TRADE_TARGETS = {
 
 const MAX_HISTORY = 1000;
 let priceHistory = [];
-let lastKnownPrice = 4474;
+let lastKnownPrice = 4603;
+let oandaAccountId = null;
 
 function pushPrice(p) {
   priceHistory.push(p);
@@ -34,25 +35,62 @@ function getHistory() { return [...priceHistory]; }
 
 const fetch = require('node-fetch');
 
-async function fetchLivePrice() {
-  // SOURCE 1: OANDA real-time
+// Get OANDA account ID (needed for pricing endpoint)
+async function getOandaAccountId(apiKey) {
+  if (oandaAccountId) return oandaAccountId;
   try {
-    const apiKey = process.env.OANDA_API_KEY;
-    if (apiKey) {
-      const r = await fetch(
-        'https://api-fxtrade.oanda.com/v3/instruments/XAU_USD/candles?count=1&granularity=S5&price=M',
-        { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 5000 }
-      );
-      if (r.ok) {
-        const d = await r.json();
-        const p = parseFloat(d?.candles?.[0]?.mid?.c);
-        if (p > 1800 && p < 7000) {
-          lastKnownPrice = p;
-          return { price: p, source: 'OANDA Live' };
+    const r = await fetch('https://api-fxtrade.oanda.com/v3/accounts', {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 5000,
+    });
+    if (r.ok) {
+      const d = await r.json();
+      oandaAccountId = d?.accounts?.[0]?.id;
+      console.log(`[OANDA] Account ID: ${oandaAccountId}`);
+      return oandaAccountId;
+    }
+  } catch (e) {
+    console.log(`[OANDA] Account ID fetch error: ${e.message}`);
+  }
+  return null;
+}
+
+async function fetchLivePrice() {
+  const apiKey = process.env.OANDA_API_KEY;
+
+  // SOURCE 1: OANDA pricing endpoint
+  if (apiKey) {
+    try {
+      const accountId = await getOandaAccountId(apiKey);
+      if (accountId) {
+        const r = await fetch(
+          `https://api-fxtrade.oanda.com/v3/accounts/${accountId}/pricing?instruments=XAU_USD`,
+          {
+            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            timeout: 5000,
+          }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          const price = d?.prices?.[0];
+          if (price) {
+            const bid = parseFloat(price.bids?.[0]?.price);
+            const ask = parseFloat(price.asks?.[0]?.price);
+            const mid = parseFloat(((bid + ask) / 2).toFixed(2));
+            if (mid > 1800 && mid < 7000) {
+              lastKnownPrice = mid;
+              return { price: mid, source: 'OANDA Live' };
+            }
+          }
+        } else {
+          const err = await r.text();
+          console.log(`[OANDA] Pricing error ${r.status}: ${err}`);
         }
       }
+    } catch (e) {
+      console.log(`[OANDA] Fetch error: ${e.message}`);
     }
-  } catch (_) {}
+  }
 
   // SOURCE 2: goldprice.org
   try {
