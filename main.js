@@ -7,9 +7,11 @@ const path     = require('path');
 const fetch    = require('node-fetch');
 const {
   fetchLivePrice, pushPrice, getHistory,
-  computeIndicators, decide, recordOutcome, getPerformanceSummary,
+  computeIndicators, computeSRLevels, computeVolume, computeHTF,
+  decide, recordOutcome, getPerformanceSummary,
   getLotSize, BASE_LOT, TRADE_TARGETS,
   MARKET_CLOSE_HOUR_UTC, MARKET_OPEN_HOUR_UTC, MAX_LOSS_PER_TRADE,
+  updateSpread,
 } = require('./engine');
 const { ensureHeaders, logTrade, logDailySummary } = require('./sheets');
 const { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory } = require('./db');
@@ -24,24 +26,28 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const state = {
-  balance:         STARTING_BALANCE,
-  trades:          [],
-  openTrades:      [],
-  currentPrice:    0,
-  priceSource:     'unknown',
-  equityHistory:   [STARTING_BALANCE],
-  log:             [],
-  stats:           { skipped:0, buys:0, sells:0, tpHits:0, slHits:0, manualCloses:0, scalps:0, days:0, swings:0 },
-  startedAt:       new Date().toISOString(),
-  lastAnalysis:    null,
-  keepAliveHits:   0,
-  dbConnected:     false,
-  consecutiveWins: 0,
-  currentLotSize:  BASE_LOT,
-  dailyPL:         0,
-  dailyPaused:     false,
-  dailyResetDate:  new Date().toDateString(),
+  balance:            STARTING_BALANCE,
+  trades:             [],
+  openTrades:         [],
+  currentPrice:       0,
+  priceSource:        'unknown',
+  currentSpread:      0,
+  equityHistory:      [STARTING_BALANCE],
+  log:                [],
+  stats:              { skipped:0, buys:0, sells:0, tpHits:0, slHits:0, manualCloses:0, scalps:0, days:0, swings:0 },
+  startedAt:          new Date().toISOString(),
+  lastAnalysis:       null,
+  keepAliveHits:      0,
+  dbConnected:        false,
+  consecutiveWins:    0,
+  currentLotSize:     BASE_LOT,
+  dailyPL:            0,
+  dailyPaused:        false,
+  dailyResetDate:     new Date().toDateString(),
   performanceSummary: null,
+  srLevels:           null,
+  volumeData:         null,
+  htfData:            null,
 };
 
 function addLog(msg, type = 'info') {
@@ -59,15 +65,6 @@ function checkDailyReset() {
     state.dailyResetDate = today;
     addLog('New day — daily P&L reset. Trading resumed.', 'info');
   }
-}
-
-// Force close all trades at market close
-function forceCloseAllAtMarketClose(hourUTC) {
-  if (hourUTC === MARKET_CLOSE_HOUR_UTC && state.openTrades.length > 0) {
-    addLog(`Market close hour ${hourUTC}:00 UTC — force closing ${state.openTrades.length} trades`, 'info');
-    return true;
-  }
-  return false;
 }
 
 function openPosition(decision, price) {
@@ -90,14 +87,13 @@ function openPosition(decision, price) {
   if (decision.tradeType === 'scalp') state.stats.scalps++;
   else if (decision.tradeType === 'day') state.stats.days++;
   else state.stats.swings++;
-  addLog(`ENTER ${decision.tradeType.toUpperCase()} ${decision.action.toUpperCase()} @ $${price} | TP $${decision.tp} | SL $${decision.sl} | Lots ${decision.lots}`, 'trade');
+  addLog(`ENTER ${decision.tradeType.toUpperCase()} ${decision.action.toUpperCase()} @ $${price} | TP $${decision.tp} | SL $${decision.sl} | Lots ${decision.lots} | Conf ${(decision.confidence*100).toFixed(0)}%`, 'trade');
 }
 
 async function closePosition(trade, price, reason) {
   const pips  = trade.type === 'buy' ? price - trade.entry : trade.entry - price;
   const pl    = parseFloat((pips * 100 * trade.lots).toFixed(2));
   const isWin = pl > 0;
-
   const closed = { ...trade, exit: price, pl, isWin, closeTime: new Date().toISOString(), closeReason: reason };
   state.openTrades = state.openTrades.filter(t => t.id !== trade.id);
   state.trades.push(closed);
@@ -105,16 +101,9 @@ async function closePosition(trade, price, reason) {
   state.dailyPL  = parseFloat((state.dailyPL + pl).toFixed(2));
   state.equityHistory.push(state.balance);
 
-  // Anti-martingale lot tracking
-  if (isWin) {
-    state.consecutiveWins++;
-    state.currentLotSize = getLotSize(state.consecutiveWins);
-  } else {
-    state.consecutiveWins = 0;
-    state.currentLotSize  = BASE_LOT;
-  }
+  if (isWin) { state.consecutiveWins++; state.currentLotSize = getLotSize(state.consecutiveWins); }
+  else        { state.consecutiveWins = 0; state.currentLotSize = BASE_LOT; }
 
-  // Record outcome for self-learning
   recordOutcome(closed);
   state.performanceSummary = getPerformanceSummary();
 
@@ -127,35 +116,26 @@ async function closePosition(trade, price, reason) {
   else if (reason === 'SL') state.stats.slHits++;
   else                      state.stats.manualCloses++;
 
-  const selfNote = !isWin
-    ? ` | AI learning: recording ${trade.conditions?.join(',') || 'conditions'} as loss`
-    : '';
-
-  addLog(
-    `EXIT ${closed.tradeType.toUpperCase()} ${closed.type.toUpperCase()} @ $${price} | ${reason} | P&L: ${pl>=0?'+':''}$${pl} | Daily: ${state.dailyPL>=0?'+':''}$${state.dailyPL}${selfNote}`,
-    isWin ? 'win' : 'loss'
-  );
-
+  const selfNote = !isWin ? ` | AI recording loss: [${trade.conditions?.join(',')||''}]` : '';
+  addLog(`EXIT ${closed.tradeType.toUpperCase()} ${closed.type.toUpperCase()} @ $${price} | ${reason} | P&L: ${pl>=0?'+':''}$${pl} | Daily: ${state.dailyPL>=0?'+':''}$${state.dailyPL}${selfNote}`, isWin ? 'win' : 'loss');
   await Promise.all([saveTrade(closed), saveEquity(state.balance), logTrade(closed)]);
 }
 
 async function priceTick() {
-  const { price, source } = await fetchLivePrice();
+  const result = await fetchLivePrice();
+  const { price, source } = result;
   state.currentPrice = price;
   state.priceSource  = source;
+  if (result.spread) state.currentSpread = result.spread;
   pushPrice(price);
 
   const hourUTC = new Date().getUTCHours();
-
-  // Force close at market close
-  if (forceCloseAllAtMarketClose(hourUTC)) {
-    for (const trade of [...state.openTrades]) {
-      await closePosition(trade, price, 'MarketClose');
-    }
+  if (hourUTC === MARKET_CLOSE_HOUR_UTC && state.openTrades.length > 0) {
+    addLog(`Market close — force closing ${state.openTrades.length} trades`, 'info');
+    for (const trade of [...state.openTrades]) await closePosition(trade, price, 'MarketClose');
     return;
   }
 
-  // Check TP/SL
   for (const trade of [...state.openTrades]) {
     if (trade.type === 'buy') {
       if (price >= trade.tp) await closePosition(trade, price, 'TP');
@@ -171,26 +151,28 @@ async function analysisCycle() {
   try {
     checkDailyReset();
     await priceTick();
-
-    if (state.dailyPaused) {
-      addLog(`Paused — daily limit. Daily P&L: $${state.dailyPL}`, 'wait');
-      return;
-    }
+    if (state.dailyPaused) { addLog(`Paused — daily limit. P&L: $${state.dailyPL}`, 'wait'); return; }
 
     const price   = state.currentPrice;
     const history = getHistory();
     const inds    = computeIndicators(price, history);
     const hourUTC = new Date().getUTCHours();
 
+    // Compute all extra data once
+    const sr  = computeSRLevels(price, history);
+    const vol = computeVolume(history);
+    const htf = computeHTF(price, history);
+    state.srLevels  = sr;
+    state.volumeData = vol;
+    state.htfData   = htf;
+
+    const extraData = { sr, vol, htf, spread: state.currentSpread };
+
     const runTradeType = async (tradeType) => {
       if (!state.openTrades.find(t => t.tradeType === tradeType)) {
-        const dec = decide(price, inds, hourUTC, state.consecutiveWins, tradeType);
-        if (dec.action !== 'wait') {
-          openPosition(dec, price);
-        } else {
-          state.stats.skipped++;
-          addLog(`${tradeType.toUpperCase()} WAIT | ${dec.reason}`, 'wait');
-        }
+        const dec = decide(price, inds, hourUTC, state.consecutiveWins, tradeType, extraData);
+        if (dec.action !== 'wait') openPosition(dec, price);
+        else { state.stats.skipped++; addLog(`${tradeType.toUpperCase()} WAIT | ${dec.reason}`, 'wait'); }
       } else {
         const t = state.openTrades.find(t => t.tradeType === tradeType);
         const u = t.type==='buy' ? (price-t.entry)*100*t.lots : (t.entry-price)*100*t.lots;
@@ -204,20 +186,20 @@ async function analysisCycle() {
 
     state.lastAnalysis = {
       ts: new Date().toISOString(), price, hourUTC,
-      priceSource:     state.priceSource,
+      priceSource: state.priceSource,
       consecutiveWins: state.consecutiveWins,
       currentLotSize:  state.currentLotSize,
       dailyPL:         state.dailyPL,
       dailyPaused:     state.dailyPaused,
-      performance:     state.performanceSummary,
+      sr:  { nearSupport: sr.nearSupport, nearResistance: sr.nearResistance, srStrength: sr.srStrength },
+      vol: { highVolume: vol.highVolume, lowVolume: vol.lowVolume, volumeScore: vol.volumeScore },
+      htf: { htfBull: htf.htfBull, htfBear: htf.htfBear, h1_rsi: htf.h1_rsi },
+      performance: state.performanceSummary,
     };
 
-  } catch (err) {
-    addLog(`Analysis error: ${err.message}`, 'error');
-  }
+  } catch (err) { addLog(`Analysis error: ${err.message}`, 'error'); }
 }
 
-// TEST TRADE
 app.post('/api/test-trade', async (req, res) => {
   try {
     const price = state.currentPrice || 4293;
@@ -235,9 +217,7 @@ app.post('/api/test-trade', async (req, res) => {
     addLog('Test trade executed', 'info');
     await Promise.all([saveTrade(closed), saveEquity(state.balance), logTrade(closed)]);
     res.json({ ok: true, trade: closed });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
+  } catch (err) { res.json({ ok: false, error: err.message }); }
 });
 
 function startKeepAlive() {
@@ -252,31 +232,27 @@ function startKeepAlive() {
 function computeStats() {
   const t = state.trades;
   if (!t.length) return null;
-  const wins    = t.filter(x => x.isWin);
-  const losses  = t.filter(x => !x.isWin);
-  const totalPL = t.reduce((a, x) => a + x.pl, 0);
-  const avgWin  = wins.length   ? wins.reduce((a,x)=>a+x.pl,0)/wins.length   : 0;
-  const avgLoss = losses.length ? losses.reduce((a,x)=>a+x.pl,0)/losses.length : 0;
-  const grossW  = wins.reduce((a,x)=>a+x.pl,0);
-  const grossL  = Math.abs(losses.reduce((a,x)=>a+x.pl,0));
-  const pf      = grossL > 0 ? grossW/grossL : null;
-  let peak = STARTING_BALANCE, mdd = 0;
-  state.equityHistory.forEach(e => { if(e>peak)peak=e; const dd=(peak-e)/peak*100; if(dd>mdd)mdd=dd; });
+  const wins=t.filter(x=>x.isWin), losses=t.filter(x=>!x.isWin);
+  const totalPL=t.reduce((a,x)=>a+x.pl,0);
+  const avgWin=wins.length?wins.reduce((a,x)=>a+x.pl,0)/wins.length:0;
+  const avgLoss=losses.length?losses.reduce((a,x)=>a+x.pl,0)/losses.length:0;
+  const grossW=wins.reduce((a,x)=>a+x.pl,0);
+  const grossL=Math.abs(losses.reduce((a,x)=>a+x.pl,0));
+  const pf=grossL>0?grossW/grossL:null;
+  let peak=STARTING_BALANCE,mdd=0;
+  state.equityHistory.forEach(e=>{if(e>peak)peak=e;const dd=(peak-e)/peak*100;if(dd>mdd)mdd=dd;});
   let maxWS=0,maxLS=0,curWS=0,curLS=0;
-  t.forEach(x => { if(x.isWin){curWS++;curLS=0;maxWS=Math.max(maxWS,curWS);}else{curLS++;curWS=0;maxLS=Math.max(maxLS,curLS);} });
-  const scalps = t.filter(x=>x.tradeType==='scalp');
-  const days   = t.filter(x=>x.tradeType==='day');
-  const swings = t.filter(x=>x.tradeType==='swing');
+  t.forEach(x=>{if(x.isWin){curWS++;curLS=0;maxWS=Math.max(maxWS,curWS);}else{curLS++;curWS=0;maxLS=Math.max(maxLS,curLS);}});
+  const scalps=t.filter(x=>x.tradeType==='scalp'),days=t.filter(x=>x.tradeType==='day'),swings=t.filter(x=>x.tradeType==='swing');
   return {
-    total:t.length, wins:wins.length, losses:losses.length,
+    total:t.length,wins:wins.length,losses:losses.length,
     winRate:(wins.length/t.length*100).toFixed(1),
-    totalPL:totalPL.toFixed(2), avgWin:avgWin.toFixed(2), avgLoss:avgLoss.toFixed(2),
+    totalPL:totalPL.toFixed(2),avgWin:avgWin.toFixed(2),avgLoss:avgLoss.toFixed(2),
     rr:avgLoss!==0?Math.abs(avgWin/avgLoss).toFixed(2):null,
     pf:pf?pf.toFixed(2):null,
-    best:Math.max(...t.map(x=>x.pl)).toFixed(2),
-    worst:Math.min(...t.map(x=>x.pl)).toFixed(2),
-    mdd:mdd.toFixed(1), maxWinStreak:maxWS, maxLossStreak:maxLS,
-    scalpsTotal:scalps.length, daysTotal:days.length, swingsTotal:swings.length,
+    best:Math.max(...t.map(x=>x.pl)).toFixed(2),worst:Math.min(...t.map(x=>x.pl)).toFixed(2),
+    mdd:mdd.toFixed(1),maxWinStreak:maxWS,maxLossStreak:maxLS,
+    scalpsTotal:scalps.length,daysTotal:days.length,swingsTotal:swings.length,
     scalpWinRate:scalps.length?(scalps.filter(x=>x.isWin).length/scalps.length*100).toFixed(1):null,
     dayWinRate:days.length?(days.filter(x=>x.isWin).length/days.length*100).toFixed(1):null,
     swingWinRate:swings.length?(swings.filter(x=>x.isWin).length/swings.length*100).toFixed(1):null,
@@ -285,95 +261,87 @@ function computeStats() {
 
 app.get('/api/state', (req, res) => {
   res.json({
-    balance:state.balance, currentPrice:state.currentPrice, priceSource:state.priceSource,
-    openTrades:state.openTrades, equityHistory:state.equityHistory,
-    recentLog:state.log.slice(0,60), stats:computeStats(),
-    activityStats:state.stats, lastAnalysis:state.lastAnalysis,
-    startedAt:state.startedAt, tradeCount:state.trades.length,
-    keepAliveHits:state.keepAliveHits, dbConnected:state.dbConnected,
-    consecutiveWins:state.consecutiveWins, currentLotSize:state.currentLotSize,
-    dailyPL:state.dailyPL, dailyPaused:state.dailyPaused, dailyLossLimit:DAILY_LOSS_LIMIT,
+    balance:state.balance,currentPrice:state.currentPrice,priceSource:state.priceSource,
+    currentSpread:state.currentSpread,
+    openTrades:state.openTrades,equityHistory:state.equityHistory,
+    recentLog:state.log.slice(0,60),stats:computeStats(),
+    activityStats:state.stats,lastAnalysis:state.lastAnalysis,
+    startedAt:state.startedAt,tradeCount:state.trades.length,
+    keepAliveHits:state.keepAliveHits,dbConnected:state.dbConnected,
+    consecutiveWins:state.consecutiveWins,currentLotSize:state.currentLotSize,
+    dailyPL:state.dailyPL,dailyPaused:state.dailyPaused,dailyLossLimit:DAILY_LOSS_LIMIT,
     performanceSummary:state.performanceSummary,
+    srLevels:state.srLevels,volumeData:state.volumeData,htfData:state.htfData,
   });
 });
 
-app.get('/api/trades', (req, res) => {
-  const page=parseInt(req.query.page||1), limit=parseInt(req.query.limit||50);
-  const slice=[...state.trades].reverse().slice((page-1)*limit,page*limit);
-  res.json({trades:slice, total:state.trades.length, page, limit});
+app.get('/api/trades',(req,res)=>{
+  const page=parseInt(req.query.page||1),limit=parseInt(req.query.limit||50);
+  res.json({trades:[...state.trades].reverse().slice((page-1)*limit,page*limit),total:state.trades.length,page,limit});
 });
 
-app.get('/api/performance', (req, res) => {
-  res.json(getPerformanceSummary());
-});
+app.get('/api/performance',(req,res)=>res.json(getPerformanceSummary()));
 
-app.post('/api/close', async (req, res) => {
-  const { id } = req.body;
-  const trade = id ? state.openTrades.find(t=>t.id===id) : state.openTrades[0];
-  if (!trade) return res.json({ok:false, message:'No open position'});
-  await closePosition(trade, state.currentPrice, 'Manual');
+app.post('/api/close',async(req,res)=>{
+  const trade=req.body.id?state.openTrades.find(t=>t.id===req.body.id):state.openTrades[0];
+  if(!trade)return res.json({ok:false,message:'No open position'});
+  await closePosition(trade,state.currentPrice,'Manual');
   res.json({ok:true});
 });
 
-app.post('/api/closeAll', async (req, res) => {
-  for (const trade of [...state.openTrades]) await closePosition(trade, state.currentPrice, 'Manual');
+app.post('/api/closeAll',async(req,res)=>{
+  for(const trade of [...state.openTrades])await closePosition(trade,state.currentPrice,'Manual');
   res.json({ok:true});
 });
 
-app.get('/health', (req, res) => {
-  res.json({ok:true, uptime:process.uptime(), trades:state.trades.length, balance:state.balance, dailyPL:state.dailyPL, dailyPaused:state.dailyPaused, priceSource:state.priceSource});
-});
+app.get('/health',(req,res)=>res.json({ok:true,uptime:process.uptime(),trades:state.trades.length,balance:state.balance,dailyPL:state.dailyPL,dailyPaused:state.dailyPaused,priceSource:state.priceSource}));
 
-cron.schedule('0 0 * * *', async () => {
-  const today = new Date().toLocaleDateString('en-US');
-  const todayTrades = state.trades.filter(x => new Date(x.closeTime).toLocaleDateString('en-US')===today);
-  if (!todayTrades.length) return;
-  const wins=todayTrades.filter(x=>x.isWin), losses=todayTrades.filter(x=>!x.isWin), pls=todayTrades.map(x=>x.pl);
-  const data = {
-    date:new Date().toISOString().split('T')[0], trades:todayTrades.length,
-    wins:wins.length, losses:losses.length,
+cron.schedule('0 0 * * *',async()=>{
+  const today=new Date().toLocaleDateString('en-US');
+  const todayTrades=state.trades.filter(x=>new Date(x.closeTime).toLocaleDateString('en-US')===today);
+  if(!todayTrades.length)return;
+  const wins=todayTrades.filter(x=>x.isWin),losses=todayTrades.filter(x=>!x.isWin),pls=todayTrades.map(x=>x.pl);
+  const data={
+    date:new Date().toISOString().split('T')[0],trades:todayTrades.length,
+    wins:wins.length,losses:losses.length,
     winRate:(wins.length/todayTrades.length*100).toFixed(1),
-    grossPL:pls.reduce((a,b)=>a+b,0).toFixed(2), balance:state.balance.toFixed(2),
+    grossPL:pls.reduce((a,b)=>a+b,0).toFixed(2),balance:state.balance.toFixed(2),
     avgWin:wins.length?(wins.reduce((a,x)=>a+x.pl,0)/wins.length).toFixed(2):0,
     avgLoss:losses.length?(losses.reduce((a,x)=>a+x.pl,0)/losses.length).toFixed(2):0,
-    best:Math.max(...pls).toFixed(2), worst:Math.min(...pls).toFixed(2),
+    best:Math.max(...pls).toFixed(2),worst:Math.min(...pls).toFixed(2),
   };
-  await Promise.all([saveDailySummary(data), logDailySummary(state)]);
-  addLog(`Daily summary logged — ${todayTrades.length} trades, P&L: $${data.grossPL}`, 'info');
-}, { timezone:'UTC' });
+  await Promise.all([saveDailySummary(data),logDailySummary(state)]);
+  addLog(`Daily summary — ${todayTrades.length} trades, P&L: $${data.grossPL}`,'info');
+},{timezone:'UTC'});
 
 async function start() {
-  console.log('XAU/USD AI Trader v2 — Self-Learning + Market Hours + Hard SL Cap');
-  app.listen(PORT, '0.0.0.0', async () => {
+  console.log('XAU/USD AI Trader v3 — MTF + S/R + Volume + Spread + Self-Learning');
+  app.listen(PORT,'0.0.0.0',async()=>{
     console.log(`[Server] Port ${PORT}`);
     await initDB();
-    state.dbConnected = true;
-    const [savedTrades, savedEquity] = await Promise.all([loadTrades(), loadEquityHistory()]);
-    if (savedTrades.length) {
-      state.trades  = savedTrades;
-      state.balance = savedTrades.reduce((a,t)=>a+t.pl, STARTING_BALANCE);
-      // Restore consecutive wins
-      let streak = 0;
-      for (let i=savedTrades.length-1;i>=0;i--) { if(savedTrades[i].isWin)streak++; else break; }
-      state.consecutiveWins = streak;
-      state.currentLotSize  = getLotSize(streak);
-      // Replay outcomes for self-learning
-      savedTrades.forEach(t => recordOutcome(t));
-      state.performanceSummary = getPerformanceSummary();
-      addLog(`Restored ${savedTrades.length} trades | Balance $${state.balance.toFixed(2)} | AI re-learned from history`, 'info');
+    state.dbConnected=true;
+    const [savedTrades,savedEquity]=await Promise.all([loadTrades(),loadEquityHistory()]);
+    if(savedTrades.length){
+      state.trades=savedTrades;
+      state.balance=savedTrades.reduce((a,t)=>a+t.pl,STARTING_BALANCE);
+      let streak=0;
+      for(let i=savedTrades.length-1;i>=0;i--){if(savedTrades[i].isWin)streak++;else break;}
+      state.consecutiveWins=streak;
+      state.currentLotSize=getLotSize(streak);
+      savedTrades.forEach(t=>recordOutcome(t));
+      state.performanceSummary=getPerformanceSummary();
+      addLog(`Restored ${savedTrades.length} trades | $${state.balance.toFixed(2)} | AI re-learned`,'info');
     }
-    if (savedEquity.length) state.equityHistory = [STARTING_BALANCE, ...savedEquity];
+    if(savedEquity.length)state.equityHistory=[STARTING_BALANCE,...savedEquity];
     await ensureHeaders();
-    const { price, source } = await fetchLivePrice();
-    state.currentPrice = price;
-    state.priceSource  = source;
-    pushPrice(price);
-    addLog(`Live | $${price} from ${source} | Max loss/trade: $${MAX_LOSS_PER_TRADE} | Daily limit: $${DAILY_LOSS_LIMIT}`, 'info');
-    setInterval(priceTick, 5000);
-    setInterval(analysisCycle, ANALYSIS_INTERVAL_SEC * 1000);
+    const {price,source}=await fetchLivePrice();
+    state.currentPrice=price;state.priceSource=source;pushPrice(price);
+    addLog(`Live | $${price} from ${source} | Max loss/trade: $${MAX_LOSS_PER_TRADE} | Daily limit: $${DAILY_LOSS_LIMIT}`,'info');
+    setInterval(priceTick,5000);
+    setInterval(analysisCycle,ANALYSIS_INTERVAL_SEC*1000);
     analysisCycle();
     startKeepAlive();
   });
 }
 
-start().catch(err => { console.error('Fatal:', err); process.exit(1); });
+start().catch(err=>{console.error('Fatal:',err);process.exit(1);});
