@@ -189,7 +189,7 @@ async function fetchLivePrice() {
   // SOURCE 1: Yahoo Finance (no API key)
   try {
     const r = await fetch(
-      'https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d',
+      'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=1d',
       { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, timeout: 5000 }
     );
     if (r.ok) {
