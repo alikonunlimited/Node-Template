@@ -291,9 +291,20 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   const target = TRADE_TARGETS[tradeType];
   const lots   = getLotSize(consecutiveWins);
 
-  const isMarketClosed = hourUTC >= MARKET_CLOSE_HOUR_UTC && hourUTC < MARKET_OPEN_HOUR_UTC;
-  const isWeekend = [0, 6].includes(new Date().getDay());
-  if (isMarketClosed || isWeekend) return { action:'wait', tradeType, reason: isWeekend ? 'Weekend closed' : 'Market close hour', confidence:0, bullScore:0, bearScore:0 };
+  const now = new Date();
+  const hourUTCnow = now.getUTCHours();
+  const dayUTC = now.getUTCDay(); // 0=Sun, 6=Sat
+
+  // Gold trades Sun 23:00 UTC to Fri 21:00 UTC with 1hr break daily at 21:00-22:00
+  const isSaturdayClosed = dayUTC === 6; // all Saturday
+  const isSundayPreOpen  = dayUTC === 0 && hourUTCnow < 23; // Sunday before 11pm UTC
+  const isDailyBreak     = hourUTCnow >= 21 && hourUTCnow < 22; // 5-6pm EST daily
+  const isFridayClose    = dayUTC === 5 && hourUTCnow >= 21; // Friday after 5pm EST
+
+  const isMarketClosed = isSaturdayClosed || isSundayPreOpen || isDailyBreak || isFridayClose;
+  if (isMarketClosed) {
+    return { action:'wait', tradeType, reason:`Market closed — ${isSaturdayClosed?'Saturday':isSundayPreOpen?'Sunday pre-open':isDailyBreak?'Daily break 5-6pm EST':'Friday close'}`, confidence:0, bullScore:0, bearScore:0 };
+  }
 
   const { spread } = extraData;
   if (spread) {
