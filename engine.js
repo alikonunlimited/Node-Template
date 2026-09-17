@@ -250,25 +250,55 @@ function getHistory() { return [...priceHistory]; }
 
 const fetch = require('node-fetch');
 
-async function fetchLivePrice() {
-  // SOURCE 1: Twelve Data
-  try {
-    const key = process.env.TWELVE_DATA_KEY;
-    if (key) {
+  async function fetchLivePrice() {
+    // SOURCE 1: Yahoo Finance (no API key needed)
+    try {
       const r = await fetch(
-        `https://api.twelvedata.com/price?symbol=XAU/USD&apikey=${key}`,
-        { timeout: 5000 }
+        'https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d',
+        { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, timeout: 5000 }
       );
       if (r.ok) {
         const d = await r.json();
-        const p = parseFloat(d?.price);
+        const p = parseFloat(d?.chart?.result?.[0]?.meta?.regularMarketPrice);
         if (p > 1800 && p < 7000) {
           lastKnownPrice = p;
-          return { price: p, source: 'Twelve Data' };
+          console.log(`[Price] Yahoo Finance → $${p}`);
+          return { price: p, source: 'Yahoo Finance' };
         }
       }
-    }
-  } catch (e) { console.log(`[Price] Twelve Data: ${e.message}`); }
+    } catch (e) { console.log(`[Price] Yahoo: ${e.message}`); }
+
+    // SOURCE 2: Twelve Data
+    try {
+      const key = process.env.TWELVE_DATA_KEY;
+      if (key) {
+        const r = await fetch(
+          `https://api.twelvedata.com/price?symbol=XAU/USD&apikey=${key}`,
+          { timeout: 5000 }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          const p = parseFloat(d?.price);
+          if (p > 1800 && p < 7000) { lastKnownPrice = p; return { price: p, source: 'Twelve Data' }; }
+        }
+      }
+    } catch (e) { console.log(`[Price] Twelve Data: ${e.message}`); }
+
+    // SOURCE 3: goldprice.org
+    try {
+      const r = await fetch('https://data-asg.goldprice.org/dbXRates/USD',
+        { headers: { Accept: 'application/json' }, timeout: 5000 });
+      if (r.ok) {
+        const d = await r.json();
+        const p = parseFloat(d?.items?.[0]?.xauPrice);
+        if (p > 1800 && p < 7000) { lastKnownPrice = p; return { price: p, source: 'goldprice.org' }; }
+      }
+    } catch (_) {}
+
+    // FALLBACK
+    const drift = (Math.random() - 0.48) * 0.5;
+    return { price: parseFloat((lastKnownPrice + drift).toFixed(2)), source: 'simulated' };
+  }
 
   // SOURCE 2: OANDA
   try {
