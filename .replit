@@ -18,3 +18,12 @@ externalPort = 80
 [[ports]]
 localPort = 24849
 externalPort = 3000
+
+[deployment]
+deploymentTarget = "cloudrun"
+
+[deployment.run]
+args = ["sh", "-c", "/nix/store/s7awkfc4pym4zj139fsxrjs5xwf5hhnd-nodejs-24.13.0-wrapped/bin/node $file"]
+
+[deployment.run.env]
+file = "main.js"
