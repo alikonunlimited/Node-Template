@@ -1,3 +1,5 @@
+
+Engine · JS
 'use strict';
 
 // ── SELF-LEARNING PERFORMANCE TRACKER ────────────────────────────────────────
@@ -74,8 +76,8 @@ function getConditionWeight(condition, baseWeight) {
 
 function getSizeMultiplier(confidence) {
   const losses = performance.consecutiveLosses;
-  if (losses >= 5) return 0;
-  if (losses >= 3) return 0.5;
+  if (losses >= 15) return 0;
+  if (losses >= 10) return 0.5;
   return Math.max(0.5, Math.min(1.0, confidence));
 }
 
@@ -189,7 +191,7 @@ async function fetchLivePrice() {
   // SOURCE 1: Yahoo Finance (no API key)
   try {
     const r = await fetch(
-      'https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?interval=1m&range=1d',
+      'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=1d',
       { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, timeout: 5000 }
     );
     if (r.ok) {
