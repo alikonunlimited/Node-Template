@@ -177,7 +177,7 @@ const MARKET_CLOSE_HOUR_UTC = 21;
 const MARKET_OPEN_HOUR_UTC  = 22;
 const MAX_HISTORY = 1000;
 let priceHistory   = [];
-let lastKnownPrice = 4336;
+let lastKnownPrice = 4289.68;
 
 function pushPrice(p) { priceHistory.push(p); if (priceHistory.length > MAX_HISTORY) priceHistory.shift(); }
 function getHistory() { return [...priceHistory]; }
