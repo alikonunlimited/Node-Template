@@ -1,7 +1,3 @@
-
-Engine · JS
-'use strict';
-
 // ── SELF-LEARNING PERFORMANCE TRACKER ────────────────────────────────────────
 const performance = {
   conditions: {
