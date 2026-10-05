@@ -183,7 +183,23 @@ async function analysisCycle() {
     await runTradeType('scalp');
     await runTradeType('day');
     await runTradeType('swing');
-
+      if (state.lastSwingTrade && !state.openTrades.find(t => t.tradeType === 'swing')) {
+      const timeSinceClose = (Date.now() - state.lastSwingTrade.closeTime) / 1000 / 60;
+      if (timeSinceClose < 60) {
+        const reentry = checkSwingReentry(price, history, state.lastSwingTrade.direction, htf, vol);
+        if (reentry.shouldReenter) {
+          const dec = decide(price, inds, hourUTC, state.consecutiveWins, 'swing', extraData);
+          if (dec.action === state.lastSwingTrade.direction) {
+            addLog(`SWING RE-ENTRY — ${reentry.reason}`, 'trade');
+            openPosition({ ...dec, reason: `[RE-ENTRY] ${dec.reason}` }, price);
+            state.lastSwingTrade = null;
+          }
+        }
+      } else {
+        state.lastSwingTrade = null;
+      }
+    }
+    
     state.lastAnalysis = {
       ts: new Date().toISOString(), price, hourUTC,
       priceSource: state.priceSource,

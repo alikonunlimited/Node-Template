@@ -1,3 +1,5 @@
+'use strict';
+
 // ── SELF-LEARNING PERFORMANCE TRACKER ────────────────────────────────────────
 const performance = {
   conditions: {
@@ -19,6 +21,8 @@ const performance = {
     low_volume:           { wins: 0, losses: 0 },
     htf_confirmed:        { wins: 0, losses: 0 },
     htf_conflicted:       { wins: 0, losses: 0 },
+    cot_bull:             { wins: 0, losses: 0 },
+    cot_bear:             { wins: 0, losses: 0 },
   },
   byType: {
     scalp_buy:  { wins: 0, losses: 0, totalPL: 0 },
@@ -26,7 +30,9 @@ const performance = {
     day_buy:    { wins: 0, losses: 0, totalPL: 0 },
     day_sell:   { wins: 0, losses: 0, totalPL: 0 },
     swing_buy:  { wins: 0, losses: 0, totalPL: 0 },
-    swing_sell: { wins: 0, losses: 0, totalPL: 0 },
+    swing_sell:    { wins: 0, losses: 0, totalPL: 0 },
+    intraday_buy:  { wins: 0, losses: 0, totalPL: 0 },
+    intraday_sell: { wins: 0, losses: 0, totalPL: 0 },
   },
   recentTrades:         [],
   totalTrades:          0,
@@ -165,10 +171,24 @@ const BASE_LOT = 0.01;
 function getLotSize(w) { return LOT_PROGRESSION[Math.min(w, LOT_PROGRESSION.length - 1)]; }
 
 const TRADE_TARGETS = {
-  scalp: { pips_tp: 3,   pips_sl: 0.75 },
-  day:   { pips_tp: 10,  pips_sl: 3    },
-  swing: { pips_tp: 100, pips_sl: 50   },
+  scalp:    { pips_tp: 3,   pips_tp_min: 1,  pips_tp_max: 5,  pips_sl: 0.75 },
+  intraday: { pips_tp: 10,  pips_tp_min: 10, pips_tp_max: 10, pips_sl: 3    },
+  day:      { pips_tp: 20,  pips_tp_min: 20, pips_tp_max: 20, pips_sl: 5    },
+  swing:    { pips_tp: 50,  pips_tp_min: 50, pips_tp_max: 50, pips_sl: 15   },
 };
+
+// Swing re-entry — ALL THREE conditions required
+function checkSwingReentry(price, history, lastTradeDirection, htf, vol) {
+  const recentMove = history.length >= 5 ? price - history[history.length - 5] : 0;
+  const momentumStrong = lastTradeDirection === 'buy' ? recentMove > 10 : recentMove < -10;
+  const htfAligned     = lastTradeDirection === 'buy' ? htf.htfBull === true : htf.htfBear === true;
+  const volumeConfirms = vol.highVolume === true;
+  return {
+    shouldReenter: momentumStrong && htfAligned && volumeConfirms,
+    momentumStrong, htfAligned, volumeConfirms,
+    reason: `Reentry — Mom:${momentumStrong} HTF:${htfAligned} Vol:${volumeConfirms}`,
+  };
+}
 
 const MAX_LOSS_PER_TRADE    = 15;
 const MARKET_CLOSE_HOUR_UTC = 21;
@@ -187,7 +207,7 @@ async function fetchLivePrice() {
   // SOURCE 1: Yahoo Finance (no API key)
   try {
     const r = await fetch(
-      'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=1d',
+      'https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?interval=1m&range=1d',
       { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, timeout: 5000 }
     );
     if (r.ok) {
@@ -315,8 +335,12 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
 
   const makeDecision = (action, reason, conf, conditions) => {
     const sl_dist = Math.min(target.pips_sl, MAX_LOSS_PER_TRADE / (lots * 100));
-    const tp = action === 'buy' ? parseFloat((price + target.pips_tp).toFixed(2)) : parseFloat((price - target.pips_tp).toFixed(2));
-    const sl = action === 'buy' ? parseFloat((price - sl_dist).toFixed(2))         : parseFloat((price + sl_dist).toFixed(2));
+    // For scalp: use random TP in $1-$5 range; others use fixed TP
+    const tp_dist = (target.pips_tp_min && target.pips_tp_min !== target.pips_tp_max)
+      ? parseFloat((target.pips_tp_min + Math.random() * (target.pips_tp_max - target.pips_tp_min)).toFixed(2))
+      : target.pips_tp;
+    const tp = action === 'buy' ? parseFloat((price + tp_dist).toFixed(2)) : parseFloat((price - tp_dist).toFixed(2));
+    const sl = action === 'buy' ? parseFloat((price - sl_dist).toFixed(2)) : parseFloat((price + sl_dist).toFixed(2));
     return { action, tradeType, reason, confidence: conf, bullScore:0, bearScore:0, tp, sl, lots, conditions };
   };
 
@@ -384,6 +408,7 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
 }
 
 module.exports = {
+  checkSwingReentry,
   fetchLivePrice, pushPrice, getHistory,
   computeIndicators, computeSRLevels, computeVolume, computeHTF,
   decide, recordOutcome, getPerformanceSummary,
