@@ -6,9 +6,11 @@ const cron     = require('node-cron');
 const path     = require('path');
 const fetch    = require('node-fetch');
 const {
+const {
   fetchLivePrice, pushPrice, getHistory,
   computeIndicators, computeSRLevels, computeVolume, computeHTF,
   decide, recordOutcome, getPerformanceSummary,
+  detectICC, isGoodSession, checkSwingReentry,
   getLotSize, BASE_LOT, TRADE_TARGETS,
   MARKET_CLOSE_HOUR_UTC, MARKET_OPEN_HOUR_UTC, MAX_LOSS_PER_TRADE,
   updateSpread,
