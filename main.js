@@ -5,7 +5,7 @@ const express  = require('express');
 const cron     = require('node-cron');
 const path     = require('path');
 const fetch    = require('node-fetch');
-const {
+
 const {
   fetchLivePrice, pushPrice, getHistory,
   computeIndicators, computeSRLevels, computeVolume, computeHTF,
@@ -15,8 +15,6 @@ const {
   MARKET_CLOSE_HOUR_UTC, MARKET_OPEN_HOUR_UTC, MAX_LOSS_PER_TRADE,
   updateSpread,
 } = require('./engine');
-const { ensureHeaders, logTrade, logDailySummary } = require('./sheets');
-const { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
