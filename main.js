@@ -325,21 +325,6 @@ app.post('/api/closeAll',async(req,res)=>{
   res.json({ok:true});
 });
 
-app.post('/api/resetLosses', (req, res) => {
-  const perf = getPerformanceSummary();
-  // Access via the engine's exported function by re-recording a fake win
-  // Simplest fix: just reset via the module directly
-  try {
-    const eng = require('./engine');
-    eng.performance.consecutiveLosses = 0;
-    state.performanceSummary = getPerformanceSummary();
-    addLog('Consecutive loss counter reset — trading resumed', 'info');
-    res.json({ ok: true, message: 'Loss counter reset to 0' });
-  } catch(e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
-
 app.get('/health',(req,res)=>res.json({ok:true,uptime:process.uptime(),trades:state.trades.length,balance:state.balance,dailyPL:state.dailyPL,dailyPaused:state.dailyPaused,priceSource:state.priceSource}));
 
 cron.schedule('0 0 * * *',async()=>{

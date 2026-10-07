@@ -21,12 +21,6 @@ const performance = {
     low_volume:           { wins: 0, losses: 0 },
     htf_confirmed:        { wins: 0, losses: 0 },
     htf_conflicted:       { wins: 0, losses: 0 },
-    cot_bull:             { wins: 0, losses: 0 },
-    cot_bear:             { wins: 0, losses: 0 },
-    icc_correction:       { wins: 0, losses: 0 },
-    icc_continuation:     { wins: 0, losses: 0 },
-    good_session:         { wins: 0, losses: 0 },
-    bad_session:          { wins: 0, losses: 0 },
   },
   byType: {
     scalp_buy:  { wins: 0, losses: 0, totalPL: 0 },
@@ -34,9 +28,7 @@ const performance = {
     day_buy:    { wins: 0, losses: 0, totalPL: 0 },
     day_sell:   { wins: 0, losses: 0, totalPL: 0 },
     swing_buy:  { wins: 0, losses: 0, totalPL: 0 },
-    swing_sell:    { wins: 0, losses: 0, totalPL: 0 },
-    intraday_buy:  { wins: 0, losses: 0, totalPL: 0 },
-    intraday_sell: { wins: 0, losses: 0, totalPL: 0 },
+    swing_sell: { wins: 0, losses: 0, totalPL: 0 },
   },
   recentTrades:         [],
   totalTrades:          0,
@@ -175,99 +167,10 @@ const BASE_LOT = 0.01;
 function getLotSize(w) { return LOT_PROGRESSION[Math.min(w, LOT_PROGRESSION.length - 1)]; }
 
 const TRADE_TARGETS = {
-  scalp:    { pips_tp: 3,   pips_tp_min: 1,  pips_tp_max: 5,  pips_sl: 0.75 },
-  intraday: { pips_tp: 10,  pips_tp_min: 10, pips_tp_max: 10, pips_sl: 3    },
-  day:      { pips_tp: 20,  pips_tp_min: 20, pips_tp_max: 20, pips_sl: 5    },
-  swing:    { pips_tp: 50,  pips_tp_min: 50, pips_tp_max: 50, pips_sl: 15   },
+  scalp: { pips_tp: 3,   pips_sl: 0.75 },
+  day:   { pips_tp: 10,  pips_sl: 3    },
+  swing: { pips_tp: 100, pips_sl: 50   },
 };
-
-// ── SCI ICC STRATEGY ─────────────────────────────────────────────────────────
-// Indication → Correction → Continuation
-// Source: Trades By Sci (Trading Course 001-004)
-
-function detectICC(price, history) {
-  if (history.length < 20) return { phase: 'unknown', bias: 'neutral', score: 0 };
-
-  const len  = history.length;
-  const last  = history[len - 1];
-  const prev5 = history.slice(-5);
-  const prev20 = history.slice(-20);
-
-  // Find recent swing highs and lows
-  const swingHighs = [], swingLows = [];
-  for (let i = 2; i < prev20.length - 2; i++) {
-    if (prev20[i] > prev20[i-1] && prev20[i] > prev20[i-2] && prev20[i] > prev20[i+1] && prev20[i] > prev20[i+2])
-      swingHighs.push({ price: prev20[i], idx: i });
-    if (prev20[i] < prev20[i-1] && prev20[i] < prev20[i-2] && prev20[i] < prev20[i+1] && prev20[i] < prev20[i+2])
-      swingLows.push({ price: prev20[i], idx: i });
-  }
-
-  if (swingHighs.length < 2 || swingLows.length < 2) return { phase: 'unknown', bias: 'neutral', score: 0 };
-
-  const lastHigh  = swingHighs[swingHighs.length - 1].price;
-  const prevHigh  = swingHighs[swingHighs.length - 2].price;
-  const lastLow   = swingLows[swingLows.length - 1].price;
-  const prevLow   = swingLows[swingLows.length - 2].price;
-
-  // Determine trend (HH/HL = bull, LL/LH = bear)
-  const higherHigh = lastHigh > prevHigh;
-  const higherLow  = lastLow  > prevLow;
-  const lowerLow   = lastLow  < prevLow;
-  const lowerHigh  = lastHigh < prevHigh;
-
-  const isBullTrend = higherHigh && higherLow;
-  const isBearTrend = lowerLow   && lowerHigh;
-
-  // ICC Phase detection
-  let phase = 'unknown', bias = 'neutral', score = 0;
-
-  if (isBullTrend) {
-    bias = 'bull';
-    // Indication: price broke above previous high
-    if (price > lastHigh) { phase = 'indication'; score = 1; }
-    // Correction: price pulled back from high, making higher low
-    else if (price < lastHigh && price > lastLow) { phase = 'correction'; score = 2; } // Best entry zone
-    // Continuation: price bounced from HL and heading back up
-    else if (price > lastLow && price > prev5[0]) { phase = 'continuation'; score = 3; }
-  } else if (isBearTrend) {
-    bias = 'bear';
-    // Indication: price broke below previous low
-    if (price < lastLow) { phase = 'indication'; score = 1; }
-    // Correction: price pulled back from low, making lower high (SELL ENTRY ZONE)
-    else if (price > lastLow && price < lastHigh) { phase = 'correction'; score = 2; }
-    // Continuation: price rejected from LH and heading back down
-    else if (price < lastHigh && price < prev5[0]) { phase = 'continuation'; score = 3; }
-  }
-
-  return {
-    phase, bias, score,
-    isBullTrend, isBearTrend,
-    lastHigh, lastLow, prevHigh, prevLow,
-    higherHigh, higherLow, lowerLow, lowerHigh,
-  };
-}
-
-// Sci's session rules
-function isGoodSession(hourUTC) {
-  // New York open: 13:30-20:00 UTC (9:30am-4pm EST) — BEST
-  // London open: 07:00-10:00 UTC (3am-6am EST) — GOOD
-  const nyOpen     = hourUTC >= 13 && hourUTC < 20;
-  const londonOpen = hourUTC >= 7  && hourUTC < 10;
-  return { isGoodSession: nyOpen || londonOpen, nyOpen, londonOpen };
-}
-
-// Swing re-entry — ALL THREE required (momentum + HTF aligned + volume)
-function checkSwingReentry(price, history, lastTradeDirection, htf, vol) {
-  const recentMove     = history.length >= 5 ? price - history[history.length - 5] : 0;
-  const momentumStrong = lastTradeDirection === 'buy' ? recentMove > 10 : recentMove < -10;
-  const htfAligned     = lastTradeDirection === 'buy' ? htf.htfBull === true : htf.htfBear === true;
-  const volumeConfirms = vol.highVolume === true;
-  return {
-    shouldReenter: momentumStrong && htfAligned && volumeConfirms,
-    momentumStrong, htfAligned, volumeConfirms,
-    reason: `Reentry Mom:${momentumStrong} HTF:${htfAligned} Vol:${volumeConfirms}`,
-  };
-}
 
 const MAX_LOSS_PER_TRADE    = 15;
 const MARKET_CLOSE_HOUR_UTC = 21;
@@ -427,44 +330,7 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   let bull = 0, bear = 0;
   const log = [], activeConditions = [];
 
-  // ── SCI ICC ANALYSIS ─────────────────────────────────────────────────────
-  const icc = detectICC(price, priceHistory);
-
-  // Session filter — Sci says NY open best, London good, avoid Sunday/off-hours
-  const sess = isGoodSession(hourUTC);
-  if (!sess.isGoodSession && tradeType === 'scalp') {
-    // Reduce score during bad sessions for scalp (Sci says less draw down in NY)
-    bull -= 1; bear -= 1;
-    log.push('Off-session');
-    activeConditions.push('bad_session');
-  } else if (sess.isGoodSession) {
-    bull += 0.5; bear += 0.5;
-    activeConditions.push('good_session');
-    log.push(sess.nyOpen ? 'NY session' : 'London session');
-  }
-
-  // ICC phase scoring — correction phase is the prime entry zone (Sci's key rule)
-  if (icc.phase === 'correction') {
-    const w = getConditionWeight('icc_correction', 2.5);
-    if (icc.bias === 'bull') { bull += w; log.push(`ICC correction-buy (w:${w.toFixed(1)})`); }
-    else if (icc.bias === 'bear') { bear += w; log.push(`ICC correction-sell (w:${w.toFixed(1)})`); }
-    activeConditions.push('icc_correction');
-  } else if (icc.phase === 'continuation') {
-    const w = getConditionWeight('icc_continuation', 1.5);
-    if (icc.bias === 'bull') { bull += w; log.push(`ICC continuation-buy`); }
-    else if (icc.bias === 'bear') { bear += w; log.push(`ICC continuation-sell`); }
-    activeConditions.push('icc_continuation');
-  } else if (icc.phase === 'indication') {
-    // Don't enter on the first break — Sci says this grabs gamblers
-    bull -= 1; bear -= 1;
-    log.push('ICC indication only — wait for correction');
-  }
-
-  // Trend alignment (Sci: daily bias must match 4H)
-  if (icc.isBullTrend) { bull += 1.5; log.push('ICC HH/HL bull trend'); }
-  else if (icc.isBearTrend) { bear += 1.5; log.push('ICC LL/LH bear trend'); }
-
-  // HTF confirmation
+  // HTF
   const htf = extraData.htf || computeHTF(price, priceHistory);
   if (htf.htfBull)       { bull += getConditionWeight('htf_confirmed', 2); log.push('HTF bull'); activeConditions.push('htf_confirmed'); }
   else if (htf.htfBear)  { bear += getConditionWeight('htf_confirmed', 2); log.push('HTF bear'); activeConditions.push('htf_confirmed'); }
@@ -519,8 +385,13 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   return makeDecision(action, `[${action.toUpperCase()}] B${bull.toFixed(1)}/S${bear.toFixed(1)} | ${log.join(' · ')}`, confidence, activeConditions);
 }
 
+function resetLosses() {
+  performance.consecutiveLosses = 0;
+  console.log("[Engine] Consecutive loss counter reset");
+}
+
 module.exports = {
-  detectICC, isGoodSession, checkSwingReentry,
+  resetLosses,
   fetchLivePrice, pushPrice, getHistory,
   computeIndicators, computeSRLevels, computeVolume, computeHTF,
   decide, recordOutcome, getPerformanceSummary,
