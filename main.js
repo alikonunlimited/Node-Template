@@ -325,6 +325,19 @@ app.post('/api/closeAll',async(req,res)=>{
   res.json({ok:true});
 });
 
+
+app.post('/api/resetLosses', (req, res) => {
+  try {
+    const { resetLosses } = require('./engine');
+    resetLosses();
+    state.performanceSummary = getPerformanceSummary();
+    addLog('Consecutive loss counter reset — trading resumed', 'info');
+    res.json({ ok: true, message: 'Loss counter reset to 0' });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/health',(req,res)=>res.json({ok:true,uptime:process.uptime(),trades:state.trades.length,balance:state.balance,dailyPL:state.dailyPL,dailyPaused:state.dailyPaused,priceSource:state.priceSource}));
 
 cron.schedule('0 0 * * *',async()=>{
