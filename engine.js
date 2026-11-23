@@ -328,9 +328,13 @@ function computeHTF(price, history) {
   const d1Mid  = (d1High + d1Low) / 2;
 
   // Is price near HTF key levels?
-  const htfZone = price * 0.002; // 0.2% zone
-  const nearHTFSupport    = [htfLow, d1Low, htfMid, d1Mid].some(lvl => Math.abs(price - lvl) < htfZone && price >= lvl);
-  const nearHTFResistance = [htfHigh, d1High, htfMid, d1Mid].some(lvl => Math.abs(price - lvl) < htfZone && price <= lvl);
+  const htfZone = price * 0.001; // 0.1% zone â€” tightened to reduce dual-fire
+  const rawNearSupport    = [htfLow, d1Low].some(lvl => Math.abs(price - lvl) < htfZone && price >= lvl);
+  const rawNearResistance = [htfHigh, d1High].some(lvl => Math.abs(price - lvl) < htfZone && price <= lvl);
+  const supportDist    = rawNearSupport    ? Math.min(...[htfLow, d1Low].map(l => Math.abs(price - l)))    : Infinity;
+  const resistanceDist = rawNearResistance ? Math.min(...[htfHigh, d1High].map(h => Math.abs(price - h))) : Infinity;
+  const nearHTFSupport    = rawNearSupport    && (!rawNearResistance || supportDist <= resistanceDist);
+  const nearHTFResistance = rawNearResistance && (!rawNearSupport    || resistanceDist < supportDist);
 
   // Tri-TF confirmation (Sci's timeframe hierarchy: D1 → H4 → H1)
   const htfBull = h1_bull && h4_bull && h1_rsi < 65;
