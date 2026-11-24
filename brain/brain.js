@@ -1708,10 +1708,12 @@ async function main() {
         return;
       }
 
-      // Replace any old relay socket
-      if (commanderRelayWs) {
-        if (commanderRelayWs._keepAlive) clearInterval(commanderRelayWs._keepAlive);
-        try { commanderRelayWs.close(); } catch(e) {}
+      // Replace any old relay socket — null it out FIRST so its close event doesn't clear the new one
+      if (commanderRelayWs && commanderRelayWs !== ws) {
+        const old = commanderRelayWs;
+        commanderRelayWs = null;
+        if (old._keepAlive) clearInterval(old._keepAlive);
+        try { if (old.readyState < 2) old.close(); } catch(e) {}
       }
       commanderRelayWs = ws;
       commanderConnected = true;
@@ -1748,8 +1750,11 @@ async function main() {
 
       ws.on('close', () => {
         if (ws._keepAlive) clearInterval(ws._keepAlive);
-        commanderConnected = false;
-        commanderRelayWs = null;
+        // Only clear if this is still the active relay socket (not already replaced)
+        if (commanderRelayWs === ws) {
+          commanderConnected = false;
+          commanderRelayWs = null;
+        }
         log('RELAY: Commander disconnected');
         hudWss.clients.forEach(browser => {
           if (browser.readyState === 1)
