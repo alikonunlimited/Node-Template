@@ -11,6 +11,23 @@ const fs        = require('fs');
 const path      = require('path');
 const { execSync, spawn } = require('child_process');
 
+// Load .env from D:\AIKON-OS\.env so BRAIN_URL/BRIDGE_KEY survive restarts
+(function loadEnv() {
+  const envPath = path.join('D:\\AIKON-OS', '.env');
+  try {
+    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim();
+      if (key && !(key in process.env)) process.env[key] = val;
+    }
+  } catch(e) { /* .env not found — env vars must be set externally */ }
+})()
+
 // WebSocket — built-in ws module (ship ws in package.json, fallback to no-ws)
 let WebSocketServer = null;
 try { WebSocketServer = require('ws').Server; } catch(e) { /* ws not installed — HUD disabled */ }
@@ -49,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.6',
+  version:       '3.7',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
