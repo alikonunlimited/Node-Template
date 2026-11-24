@@ -401,9 +401,10 @@ const BASE_LOT = 0.01;
 function getLotSize(w) { return LOT_PROGRESSION[Math.min(w, LOT_PROGRESSION.length - 1)]; }
 
 const TRADE_TARGETS = {
-  scalp: { pips_tp: 3,   pips_sl: 0.75 },
-  day:   { pips_tp: 10,  pips_sl: 3    },
-  swing: { pips_tp: 100, pips_sl: 50   },
+  scalp:    { pips_tp: 3,   pips_sl: 0.75 },
+  intraday: { pips_tp: 6,   pips_sl: 2    },
+  day:      { pips_tp: 10,  pips_sl: 3    },
+  swing:    { pips_tp: 100, pips_sl: 50   },
 };
 
 const MAX_LOSS_PER_TRADE    = 15;
@@ -600,14 +601,8 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   const { rsi, stoch, macd, momentum, trend, ema_align } = indicators;
   const isBest  = YOUR_PATTERNS.bestHoursUTC.includes(hourUTC);
   const isWorst = YOUR_PATTERNS.worstHoursUTC.includes(hourUTC);
-  let bull = 0, bear = 0;
+  let bull = 0, bear = 0;  // declared before HTF so early-return can reference them
   const log = [], activeConditions = [];
-
-  // FIX 4: Dynamic live bias — if buy side is historically outperforming, give a small head-start
-  const dominantDir = getDominantDirection();
-  const liveWR = getLiveWinRate();
-  if (dominantDir === 'buy'  && liveWR > YOUR_PATTERNS.breakEvenWinRate) { bull += 0.5; log.push(`Live bias: buy (${(liveWR*100).toFixed(0)}%WR)`); }
-  if (dominantDir === 'sell' && liveWR > YOUR_PATTERNS.breakEvenWinRate) { bear += 0.5; log.push(`Live bias: sell (${(liveWR*100).toFixed(0)}%WR)`); }
 
   // ── HTF (Higher Timeframe) Analysis ──────────────────────────────────────────
   const htf = extraData.htf || computeHTF(price, priceHistory);
@@ -615,6 +610,12 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   else if (htf.htfBear)  { bear += getConditionWeight('htf_confirmed', 2); log.push('HTF bear'); activeConditions.push('htf_confirmed'); }
   else                   { bull -= 0.5; bear -= 0.5; log.push('HTF conflicted'); activeConditions.push('htf_conflicted');
                            return { action:'wait', tradeType, reason:'HTF conflicted — all modes paused until alignment', confidence:0, bullScore:bull, bearScore:bear }; }
+
+  // FIX 4: Dynamic live bias — if buy side is historically outperforming, give a small head-start
+  const dominantDir = getDominantDirection();
+  const liveWR = getLiveWinRate();
+  if (dominantDir === 'buy'  && liveWR > YOUR_PATTERNS.breakEvenWinRate) { bull += 0.5; log.push(`Live bias: buy (${(liveWR*100).toFixed(0)}%WR)`); }
+  if (dominantDir === 'sell' && liveWR > YOUR_PATTERNS.breakEvenWinRate) { bear += 0.5; log.push(`Live bias: sell (${(liveWR*100).toFixed(0)}%WR)`); }
 
   // Full 3-TF alignment gives bonus
   if (htf.fullBullAlign) { bull += 1.5; log.push('D1+H4+H1 bull align'); }
