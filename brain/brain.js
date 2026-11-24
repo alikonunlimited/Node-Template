@@ -330,6 +330,17 @@ const express = require('express');
 const app = express();
 app.use(require('express').json());
 
+// WebSocket proxy — browser connects here, we forward to Commander on Thomas
+let WS = null;
+try { WS = require('ws'); } catch(e) { log('ws not installed — HUD proxy disabled'); }
+
+// Offline feed buffer — last 50 events, served to new HUD connections when Thomas is offline
+const feedBuffer = [];
+function bufferFeed(msg) {
+  feedBuffer.push(msg);
+  if (feedBuffer.length > 50) feedBuffer.shift();
+}
+
 // Auth middleware
 function auth(req, res, next) {
   const key = req.headers['x-bridge-key'] || req.query.key;
@@ -1049,9 +1060,9 @@ body::after{
 <script>
 // ── CONFIG ──
 const BRAIN_URL   = location.origin;
-const THOMAS_IP   = '100.91.204.20';
-const THOMAS_WS   = \`ws://\${THOMAS_IP}:3000\`;
 const BRIDGE_KEY  = '';  // Set to your BRIDGE_KEY for authenticated endpoints
+// WebSocket connects to Brain's proxy (/ws) — Brain forwards to Commander on Thomas
+const BRAIN_WS    = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 
 // ── CLOCK ──
 function tickClock() {
@@ -1084,9 +1095,9 @@ function connectWS() {
   if (ws && ws.readyState < 2) return;
   connEl.className = 'connecting';
   connEl.textContent = '◉ CONNECTING';
-  addFeed('sys', \`Connecting to Commander at \${THOMAS_WS}…\`);
+  addFeed('sys', \`Connecting via Brain relay…\`);
   try {
-    ws = new WebSocket(THOMAS_WS);
+    ws = new WebSocket(BRAIN_WS);
   } catch(e) {
     scheduleReconnect('WebSocket not supported');
     return;
@@ -1123,6 +1134,13 @@ function handleWsMsg(d) {
   if (d.t === 'log') { addFeed('log', d.msg); return; }
   if (d.t === 'cmd') { addFeed('cmd', '▶ ' + d.input); return; }
   if (d.t === 'err') { addFeed('err', '✖ ' + d.msg); return; }
+  if (d.t === 'sys') { addFeed('sys', d.msg); return; }
+  if (d.t === 'offline') { addFeed('err', '⚠ Thomas offline — HUD in standby'); return; }
+  if (d.t === 'buffer') {
+    // Replay buffered feed events
+    (d.items || []).forEach(item => handleWsMsg(item));
+    return;
+  }
   if (d.t === 'hello' || d.t === 'stats') {
     setStatus(d);
     addFeed('sys', d.t === 'hello' ? \`Commander v\${d.version} handshake ✓\` : '');
@@ -1523,7 +1541,81 @@ async function main() {
     process.exit(1);
   }
 
-  app.listen(PORT, () => log(`HTTP: listening on port ${PORT}`));
+  const server = require('http').createServer(app);
+
+  // WebSocket proxy for JARVIS HUD
+  // Browser → Brain WSS (/ws) → Commander WS (Thomas:3000)
+  if (WS) {
+    const { WebSocketServer, WebSocket: WSClient } = WS;
+    const wss = new WebSocketServer({ server, path: '/ws' });
+
+    wss.on('connection', (browserWs) => {
+      log(`HUD: browser connected (${wss.clients.size} total)`);
+
+      // Replay buffer so HUD isn't blank on fresh connect
+      if (feedBuffer.length) {
+        browserWs.send(JSON.stringify({ t: 'buffer', items: feedBuffer }));
+      }
+
+      // Connect to Commander on Thomas via Tailscale
+      const commanderWsUrl = `ws://${THOMAS_IP}:3000`;
+      let thomasWs = null;
+      let thomasAlive = false;
+
+      function connectToThomas() {
+        if (browserWs.readyState !== 1) return; // browser already gone
+        try {
+          thomasWs = new WSClient(commanderWsUrl, { handshakeTimeout: 5000 });
+        } catch(e) {
+          browserWs.send(JSON.stringify({ t: 'sys', msg: 'Commander unreachable — Thomas may be offline' }));
+          return;
+        }
+
+        thomasWs.on('open', () => {
+          thomasAlive = true;
+          browserWs.send(JSON.stringify({ t: 'sys', msg: 'Commander connected via Brain relay ✓' }));
+          log(`HUD: relay open → ${commanderWsUrl}`);
+        });
+
+        thomasWs.on('message', (data) => {
+          try {
+            const msg = data.toString();
+            bufferFeed(JSON.parse(msg));
+            if (browserWs.readyState === 1) browserWs.send(msg);
+          } catch(e) {}
+        });
+
+        thomasWs.on('close', () => {
+          thomasAlive = false;
+          if (browserWs.readyState === 1) {
+            browserWs.send(JSON.stringify({ t: 'sys', msg: 'Commander disconnected — retrying in 15s…' }));
+          }
+          setTimeout(connectToThomas, 15000);
+        });
+
+        thomasWs.on('error', () => {
+          if (browserWs.readyState === 1) {
+            browserWs.send(JSON.stringify({ t: 'offline', msg: 'Thomas offline' }));
+          }
+        });
+      }
+
+      connectToThomas();
+
+      browserWs.on('close', () => {
+        log(`HUD: browser disconnected`);
+        if (thomasWs) try { thomasWs.close(); } catch(e) {}
+      });
+
+      browserWs.on('error', () => {
+        if (thomasWs) try { thomasWs.close(); } catch(e) {}
+      });
+    });
+
+    log(`HUD: WebSocket proxy ready at /ws`);
+  }
+
+  server.listen(PORT, () => log(`HTTP: listening on port ${PORT}`));
 
   // First cycle after 5s, then every 5 minutes
   setTimeout(learnCycle, 5000);
