@@ -731,6 +731,54 @@ setInterval(checkThomas, 60000);
 </html>`);
 });
 
+// /message — Phone PWA relay: forwards to Commander /message on Thomas, falls back to Brain memory
+app.post('/message', async (req, res) => {
+  const { message, source = 'bridge' } = req.body || {};
+  if (!message) return res.json({ error: 'No message' });
+  const commanderPort = process.env.THOMAS_COMMANDER_PORT || 3000;
+  // Try to forward to Commander on Thomas
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ message, source });
+      const opts = {
+        hostname: THOMAS_IP, port: commanderPort,
+        path: '/message', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'x-bridge-key': process.env.BRIDGE_KEY || '' },
+        timeout: 8000
+      };
+      const req2 = http.request(opts, r => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => resolve(d));
+      });
+      req2.on('error', reject);
+      req2.on('timeout', () => { req2.destroy(); reject(new Error('timeout')); });
+      req2.write(body);
+      req2.end();
+    });
+    const parsed = JSON.parse(response);
+    return res.json(parsed);
+  } catch(e) {
+    // Thomas offline — fall back to Brain memory response
+    log(`MESSAGE_RELAY: Thomas unreachable (${e.message}) — falling back to Brain`);
+    try {
+      const { rows } = await query(
+        `SELECT branch, content FROM brain_memory WHERE content ILIKE $1 ORDER BY created_at DESC LIMIT 5`,
+        [`%${message.substring(0,50).replace(/%/g,'')}%`]
+      );
+      const context = rows.length
+        ? rows.map(r => `[${r.branch}] ${r.content}`).join('\n')
+        : 'No matching memory found.';
+      return res.json({
+        response: `[Brain offline-mode]\n${context}\n\nThomas is offline — wake it via the ⚡ button to reach Commander directly.`,
+        offline: true
+      });
+    } catch(dbErr) {
+      return res.json({ error: 'Brain unavailable', offline: true });
+    }
+  }
+});
+
 // /ask endpoint for mobile UI chat
 app.post('/ask', async (req, res) => {
   const { q } = req.body || {};
@@ -748,6 +796,718 @@ app.post('/ask', async (req, res) => {
     res.json({ answer: `Based on brain memory:\n\n${context}\n\nAsk Commander directly for deeper analysis.` });
   } catch(e) { res.json({ error: e.message }); }
 });
+
+// ─── JARVIS HUD ───────────────────────────────────────────────────────────────
+// Fullscreen futuristic display — served at /jarvis
+// Connects to Commander's WebSocket on Thomas for live feed
+app.get('/jarvis', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(JARVIS_HUD_HTML);
+});
+
+// ─── PHONE VOICE PWA ─────────────────────────────────────────────────────────
+// Installable PWA — served at /app
+app.get('/app', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(PHONE_PWA_HTML);
+});
+
+// PWA manifest
+app.get('/app.webmanifest', (req, res) => {
+  res.json({
+    name: 'AIKON Commander',
+    short_name: 'Commander',
+    description: 'Voice interface to AIKON-OS Commander',
+    start_url: '/app',
+    display: 'standalone',
+    background_color: '#050510',
+    theme_color: '#7c3aed',
+    icons: [
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png' }
+    ]
+  });
+});
+
+// SVG icon for PWA (purple lightning bolt)
+app.get('/icon-192.png', (req, res) => {
+  // Return an SVG that browsers can use as a fallback
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#050510"/><text x="96" y="130" text-anchor="middle" font-size="100" fill="#7c3aed">⚡</text></svg>`);
+});
+app.get('/icon-512.png', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="80" fill="#050510"/><text x="256" y="340" text-anchor="middle" font-size="260" fill="#7c3aed">⚡</text></svg>`);
+});
+
+// ─── STATIC HTML ─────────────────────────────────────────────────────────────
+const JARVIS_HUD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JARVIS HUD — AIKON-OS</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#020208;--panel:#07071a;--border:#1a1a4e;
+  --cyan:#00f5ff;--purple:#b366ff;--green:#00ff88;--red:#ff3366;--yellow:#ffe600;
+  --dim:#334;--glow-cyan:0 0 20px #00f5ff66;--glow-purple:0 0 20px #b366ff55;
+  --font-hud:'Orbitron',monospace;--font-mono:'Share Tech Mono',monospace;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--cyan);font-family:var(--font-hud);overflow:hidden}
+body{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:1fr;height:100vh}
+
+/* ── TOP BAR ── */
+#topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 24px;background:rgba(0,245,255,.03);
+  border-bottom:1px solid var(--border);
+  backdrop-filter:blur(4px);position:relative;z-index:10;
+}
+#topbar .logo{font-size:1.1rem;font-weight:900;letter-spacing:.2em;color:var(--cyan);text-shadow:var(--glow-cyan)}
+#topbar .subtitle{font-size:.6rem;color:var(--purple);letter-spacing:.15em;margin-top:2px}
+#topbar .clock{font-size:1.3rem;font-weight:700;color:var(--yellow);font-family:var(--font-mono);letter-spacing:.1em}
+#topbar .date{font-size:.6rem;color:var(--dim);letter-spacing:.1em;text-align:right;margin-top:2px}
+#conn-status{font-size:.65rem;letter-spacing:.1em;padding:3px 10px;border-radius:12px;border:1px solid;transition:.3s}
+#conn-status.connected{color:var(--green);border-color:var(--green);box-shadow:0 0 10px #00ff8844}
+#conn-status.disconnected{color:var(--red);border-color:var(--red)}
+#conn-status.connecting{color:var(--yellow);border-color:var(--yellow)}
+
+/* ── MAIN GRID ── */
+#main{display:grid;grid-template-columns:280px 1fr 280px;gap:12px;padding:12px 16px;overflow:hidden;height:100%}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;position:relative;overflow:hidden;display:flex;flex-direction:column;gap:8px}
+.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.6}
+.panel.purple::before{background:linear-gradient(90deg,transparent,var(--purple),transparent)}
+.panel.green::before{background:linear-gradient(90deg,transparent,var(--green),transparent)}
+.panel-title{font-size:.6rem;letter-spacing:.2em;color:var(--dim);text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.panel-title::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* ── LEFT COLUMN ── */
+#panel-status .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a3a;font-size:.72rem}
+#panel-status .stat-row:last-child{border:none}
+#panel-status .stat-label{color:var(--dim)}
+#panel-status .stat-val{color:var(--cyan);font-family:var(--font-mono)}
+#panel-status .stat-val.ok{color:var(--green)}
+#panel-status .stat-val.off{color:var(--red)}
+#panel-status .stat-val.warn{color:var(--yellow)}
+
+#panel-trader{flex:1}
+.trader-price{font-size:1.6rem;font-weight:700;color:var(--yellow);font-family:var(--font-mono);letter-spacing:.05em;text-shadow:0 0 20px #ffe60066;text-align:center;padding:8px 0}
+.trader-row{display:flex;justify-content:space-between;font-size:.7rem;padding:3px 0;border-bottom:1px solid #1a1a3a}
+.trader-row:last-child{border:none}
+.trader-row span:first-child{color:var(--dim)}
+.trader-row span:last-child{font-family:var(--font-mono);color:var(--cyan)}
+
+/* ── CENTER COLUMN ── */
+#panel-feed{flex:1;min-height:0}
+#feed-log{flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.75rem;line-height:1.6;min-height:0;max-height:100%;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+#feed-log::-webkit-scrollbar{width:4px}
+#feed-log::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.feed-line{padding:2px 0;border-bottom:1px solid #0a0a20;animation:fadeIn .3s ease}
+.feed-line.cmd{color:var(--purple)}
+.feed-line.log{color:var(--cyan)}
+.feed-line.err{color:var(--red)}
+.feed-line.sys{color:var(--dim)}
+.feed-line .feed-ts{color:#334;margin-right:8px;font-size:.65rem}
+@keyframes fadeIn{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+
+#panel-opp{max-height:180px}
+.opp-item{font-size:.7rem;padding:5px 0;border-bottom:1px solid #1a1a3a;line-height:1.4}
+.opp-item:last-child{border:none}
+.opp-item .opp-score{color:var(--yellow);font-weight:700;float:right;font-family:var(--font-mono)}
+.opp-item .opp-branch{font-size:.6rem;color:var(--purple);margin-bottom:2px}
+.opp-item .opp-text{color:var(--cyan)}
+
+/* ── RIGHT COLUMN ── */
+#panel-teams{}
+.team-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1a1a3a;font-size:.72rem}
+.team-item:last-child{border:none}
+.team-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
+.team-dot.active{background:var(--green);box-shadow:0 0 8px var(--green)}
+.team-name{color:var(--cyan)}
+.team-model{font-size:.6rem;color:var(--dim);margin-left:auto;font-family:var(--font-mono)}
+
+#panel-memory{flex:1;min-height:0}
+#memory-scroll{flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.68rem;line-height:1.5;min-height:0;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.mem-line{padding:2px 0;border-bottom:1px solid #0a0a20}
+.mem-line .mem-branch{color:var(--purple);font-size:.6rem}
+.mem-line .mem-text{color:#8899bb}
+
+/* ── BOTTOM BAR ── */
+#bottombar{padding:8px 24px;background:rgba(0,245,255,.02);border-top:1px solid var(--border);display:flex;align-items:center;gap:16px;font-size:.6rem;letter-spacing:.1em;color:var(--dim)}
+#bottombar .sep{color:var(--border)}
+.uptime-val{color:var(--green);font-family:var(--font-mono)}
+.version-val{color:var(--purple)}
+
+/* ── SCAN LINE OVERLAY ── */
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:999;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px);
+}
+
+/* ── CORNER DECORATIONS ── */
+.panel::after{
+  content:'';position:absolute;top:6px;right:6px;width:6px;height:6px;
+  border-top:1px solid var(--cyan);border-right:1px solid var(--cyan);opacity:.4;
+}
+.panel::before,.panel::after{pointer-events:none}
+
+/* ── PULSE ANIMATION ── */
+@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+.pulsing{animation:pulse 2s ease-in-out infinite}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div>
+    <div class="logo">⚡ AIKON-OS COMMANDER</div>
+    <div class="subtitle">JARVIS HUD v3.2 · REAL-TIME SYSTEM MONITOR</div>
+  </div>
+  <div style="text-align:center">
+    <div id="conn-status" class="connecting">◉ CONNECTING</div>
+  </div>
+  <div style="text-align:right">
+    <div class="clock" id="clock">--:--:--</div>
+    <div class="date" id="date">...</div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div id="main">
+
+  <!-- LEFT: STATUS + TRADER -->
+  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden">
+    <div class="panel" id="panel-status">
+      <div class="panel-title">◈ SYSTEM STATUS</div>
+      <div class="stat-row"><span class="stat-label">VERSION</span><span class="stat-val" id="sv-version">--</span></div>
+      <div class="stat-row"><span class="stat-label">UPTIME</span><span class="stat-val" id="sv-uptime">--</span></div>
+      <div class="stat-row"><span class="stat-label">DEEPSEEK R1</span><span class="stat-val" id="sv-ds">--</span></div>
+      <div class="stat-row"><span class="stat-label">TTS VOICE</span><span class="stat-val" id="sv-tts">--</span></div>
+      <div class="stat-row"><span class="stat-label">WAKE WORD</span><span class="stat-val" id="sv-wake">--</span></div>
+      <div class="stat-row"><span class="stat-label">BRAIN LINK</span><span class="stat-val" id="sv-brain">--</span></div>
+      <div class="stat-row"><span class="stat-label">HUD CLIENTS</span><span class="stat-val" id="sv-clients">--</span></div>
+    </div>
+    <div class="panel purple" id="panel-trader" style="flex:1">
+      <div class="panel-title">◈ XAU/USD TRADER</div>
+      <div class="trader-price pulsing" id="t-price">$-.--</div>
+      <div class="trader-row"><span>STATUS</span><span id="t-status">--</span></div>
+      <div class="trader-row"><span>BALANCE</span><span id="t-balance">--</span></div>
+      <div class="trader-row"><span>WIN RATE</span><span id="t-winrate">--</span></div>
+      <div class="trader-row"><span>OPEN TRADES</span><span id="t-open">--</span></div>
+      <div class="trader-row"><span>CONSEC LOSSES</span><span id="t-losses">--</span></div>
+      <div class="trader-row"><span>LAST UPDATE</span><span id="t-ts">--</span></div>
+    </div>
+  </div>
+
+  <!-- CENTER: LIVE FEED + OPPORTUNITIES -->
+  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
+    <div class="panel" id="panel-feed" style="flex:1;min-height:0">
+      <div class="panel-title">◈ LIVE COMMANDER FEED</div>
+      <div id="feed-log"></div>
+    </div>
+    <div class="panel green" id="panel-opp">
+      <div class="panel-title">◈ TOP OPPORTUNITIES</div>
+      <div id="opp-list"><div style="color:var(--dim);font-size:.7rem">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: TEAMS + MEMORY -->
+  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden">
+    <div class="panel purple" id="panel-teams">
+      <div class="panel-title">◈ ACTIVE TEAMS</div>
+      <div class="team-item"><span class="team-dot active"></span><span class="team-name">TRADER</span><span class="team-model">deepseek-r1</span></div>
+      <div class="team-item"><span class="team-dot active"></span><span class="team-name">RESEARCH</span><span class="team-model">phi3:mini</span></div>
+      <div class="team-item"><span class="team-dot active"></span><span class="team-name">BIZ</span><span class="team-model">phi3:mini</span></div>
+      <div class="team-item"><span class="team-dot"></span><span class="team-name">ROBLOX</span><span class="team-model">phi3:mini</span></div>
+    </div>
+    <div class="panel" id="panel-memory" style="flex:1;min-height:0">
+      <div class="panel-title">◈ BRAIN MEMORY FEED</div>
+      <div id="memory-scroll"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- BOTTOM BAR -->
+<div id="bottombar">
+  <span>AIKON-OS COMMANDER HUD</span>
+  <span class="sep">|</span>
+  <span>UPTIME <span class="uptime-val" id="b-uptime">--</span></span>
+  <span class="sep">|</span>
+  <span>BRAIN CYCLES <span class="uptime-val" id="b-cycles">--</span></span>
+  <span class="sep">|</span>
+  <span>MEMORIES <span class="uptime-val" id="b-memories">--</span></span>
+  <span class="sep">|</span>
+  <span class="version-val" id="b-version">v--</span>
+  <span style="margin-left:auto;color:#334">AL iKON UNLIMITED LLC</span>
+</div>
+
+<script>
+// ── CONFIG ──
+const BRAIN_URL   = location.origin;
+const THOMAS_IP   = '100.91.204.20';
+const THOMAS_WS   = \`ws://\${THOMAS_IP}:3000\`;
+const BRIDGE_KEY  = '';  // Set to your BRIDGE_KEY for authenticated endpoints
+
+// ── CLOCK ──
+function tickClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toTimeString().slice(0,8);
+  document.getElementById('date').textContent = now.toDateString().toUpperCase();
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ── FEED ──
+const feedLog = document.getElementById('feed-log');
+const MAX_FEED = 150;
+function addFeed(cls, text) {
+  const ts = new Date().toTimeString().slice(0,8);
+  const line = document.createElement('div');
+  line.className = \`feed-line \${cls}\`;
+  line.innerHTML = \`<span class="feed-ts">\${ts}</span>\${escapeHtml(text)}\`;
+  feedLog.appendChild(line);
+  while (feedLog.children.length > MAX_FEED) feedLog.removeChild(feedLog.firstChild);
+  feedLog.scrollTop = feedLog.scrollHeight;
+}
+function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── WEBSOCKET TO COMMANDER ──
+let ws = null, wsRetry = 0, wsRetryMax = 20;
+const connEl = document.getElementById('conn-status');
+
+function connectWS() {
+  if (ws && ws.readyState < 2) return;
+  connEl.className = 'connecting';
+  connEl.textContent = '◉ CONNECTING';
+  addFeed('sys', \`Connecting to Commander at \${THOMAS_WS}…\`);
+  try {
+    ws = new WebSocket(THOMAS_WS);
+  } catch(e) {
+    scheduleReconnect('WebSocket not supported');
+    return;
+  }
+  ws.onopen = () => {
+    wsRetry = 0;
+    connEl.className = 'connected';
+    connEl.textContent = '◉ LIVE';
+    addFeed('sys', 'Commander feed connected ✓');
+  };
+  ws.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      handleWsMsg(d);
+    } catch(e) {}
+  };
+  ws.onclose = () => {
+    connEl.className = 'disconnected';
+    connEl.textContent = '◉ OFFLINE';
+    scheduleReconnect('Connection lost');
+  };
+  ws.onerror = () => {};
+}
+
+function scheduleReconnect(reason) {
+  wsRetry++;
+  if (wsRetry > wsRetryMax) { addFeed('sys', 'Max reconnect attempts — Commander offline'); return; }
+  const delay = Math.min(3000 * wsRetry, 30000);
+  addFeed('sys', \`\${reason} — retry #\${wsRetry} in \${(delay/1000).toFixed(0)}s\`);
+  setTimeout(connectWS, delay);
+}
+
+function handleWsMsg(d) {
+  if (d.t === 'log') { addFeed('log', d.msg); return; }
+  if (d.t === 'cmd') { addFeed('cmd', '▶ ' + d.input); return; }
+  if (d.t === 'err') { addFeed('err', '✖ ' + d.msg); return; }
+  if (d.t === 'hello' || d.t === 'stats') {
+    setStatus(d);
+    addFeed('sys', d.t === 'hello' ? \`Commander v\${d.version} handshake ✓\` : '');
+    return;
+  }
+}
+
+function setStatus(d) {
+  const set = (id, val, okTest) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = 'stat-val ' + (okTest == null ? '' : okTest ? 'ok' : 'off');
+  };
+  if (d.version) {
+    set('sv-version', 'v' + d.version);
+    document.getElementById('b-version').textContent = 'v' + d.version;
+  }
+  if (d.uptime != null) {
+    const u = formatUptime(d.uptime);
+    set('sv-uptime', u);
+    document.getElementById('b-uptime').textContent = u;
+  }
+  if (d.deepseek != null) set('sv-ds',    d.deepseek ? 'READY' : 'OFFLINE', d.deepseek);
+  if (d.tts     != null) set('sv-tts',   d.tts    ? 'ACTIVE' : 'OFFLINE', d.tts);
+  if (d.wake    != null) set('sv-wake',  d.wake   ? 'ACTIVE' : 'OFFLINE', d.wake);
+  if (d.brain   != null) set('sv-brain', d.brain  ? 'LINKED' : 'OFFLINE', d.brain);
+  if (d.clients != null) set('sv-clients', d.clients);
+}
+
+function formatUptime(s) {
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  return [h,m,sec].map(n=>String(n).padStart(2,'0')).join(':');
+}
+
+// ── TRADER DATA ──
+async function loadTrader() {
+  try {
+    const r = await fetch('https://xauusd-trader-80p0.onrender.com/api/state');
+    const d = await r.json();
+    document.getElementById('t-price').textContent   = '$' + (d.currentPrice||0).toFixed(2);
+    document.getElementById('t-status').textContent  = d.status || '--';
+    document.getElementById('t-balance').textContent = '$' + (d.balance||0).toFixed(2);
+    document.getElementById('t-winrate').textContent = (d.winRate||0).toFixed(1) + '%';
+    document.getElementById('t-open').textContent    = d.openTrades || 0;
+    document.getElementById('t-losses').textContent  = d.consecutiveLosses || 0;
+    document.getElementById('t-ts').textContent      = new Date().toTimeString().slice(0,8);
+  } catch(e) {
+    document.getElementById('t-price').textContent = 'OFFLINE';
+  }
+}
+
+// ── BRAIN DATA ──
+async function loadBrainData() {
+  try {
+    const headers = BRIDGE_KEY ? { 'x-bridge-key': BRIDGE_KEY } : {};
+    const r = await fetch(\`\${BRAIN_URL}/status\`, { headers });
+    const d = await r.json();
+    document.getElementById('b-cycles').textContent   = d.cycle_count || '--';
+    document.getElementById('b-memories').textContent = d.total_memories || '--';
+  } catch(e) {}
+}
+
+async function loadOpportunities() {
+  try {
+    const headers = BRIDGE_KEY ? { 'x-bridge-key': BRIDGE_KEY } : {};
+    const r = await fetch(\`\${BRAIN_URL}/opportunities\`, { headers });
+    const d = await r.json();
+    const list = document.getElementById('opp-list');
+    if (!d.items?.length) { list.innerHTML = '<div style="color:var(--dim);font-size:.7rem">No opportunities scored yet.</div>'; return; }
+    list.innerHTML = d.items.slice(0,4).map(o => \`
+<div class="opp-item">
+  <span class="opp-score">\${(o.score||0).toFixed(1)}</span>
+  <div class="opp-branch">\${o.branch?.toUpperCase()}</div>
+  <div class="opp-text">\${escapeHtml((o.content||'').substring(0,120))}</div>
+</div>\`).join('');
+  } catch(e) {}
+}
+
+async function loadMemoryFeed() {
+  try {
+    const r = await fetch(\`\${BRAIN_URL}/memory?limit=20\`);
+    const d = await r.json();
+    const scroll = document.getElementById('memory-scroll');
+    const items = d.items || d.memories || [];
+    if (!items.length) { scroll.innerHTML = '<div style="color:var(--dim);font-size:.7rem">No memories yet.</div>'; return; }
+    scroll.innerHTML = items.map(m => \`<div class="mem-line">
+      <div class="mem-branch">\${(m.branch||'').toUpperCase()} · \${m.type||m.memory_type||''}</div>
+      <div class="mem-text">\${escapeHtml((m.content||m.insight||'').substring(0,120))}</div>
+    </div>\`).join('');
+  } catch(e) {}
+}
+
+// ── INIT ──
+connectWS();
+loadTrader();
+loadBrainData();
+loadOpportunities();
+loadMemoryFeed();
+setInterval(loadTrader,       60000);
+setInterval(loadBrainData,    30000);
+setInterval(loadOpportunities, 60000);
+setInterval(loadMemoryFeed,   45000);
+</script>
+</body>
+</html>`;
+
+// ─── PHONE VOICE PWA ─────────────────────────────────────────────────────────
+const PHONE_PWA_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#050510">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Commander">
+<link rel="manifest" href="/app.webmanifest">
+<title>Commander Voice</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap');
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#050510;--card:#0a0a1e;--border:#1a1a4e;
+  --purple:#9333ea;--cyan:#22d3ee;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;
+  --text:#e2e8f0;--muted:#64748b;
+  --safe-top:env(safe-area-inset-top,0px);
+  --safe-bot:env(safe-area-inset-bottom,0px);
+  --font:'Orbitron',sans-serif;--mono:'Share Tech Mono',monospace;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
+body{display:flex;flex-direction:column;height:100%;padding-top:var(--safe-top);padding-bottom:var(--safe-bot)}
+
+/* ── HEADER ── */
+header{padding:14px 20px 10px;text-align:center;background:linear-gradient(180deg,rgba(147,51,234,.15),transparent)}
+header h1{font-size:1rem;font-weight:700;letter-spacing:.15em;color:var(--purple)}
+#online-pill{display:inline-flex;align-items:center;gap:5px;font-size:.6rem;letter-spacing:.1em;padding:3px 10px;border-radius:12px;border:1px solid;margin-top:4px;transition:.3s}
+#online-pill.online{color:var(--green);border-color:var(--green)}
+#online-pill.offline{color:var(--red);border-color:var(--red)}
+#online-pill.checking{color:var(--yellow);border-color:var(--yellow)}
+.pill-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* ── CONVERSATION ── */
+#convo{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px;min-height:0}
+.bubble{max-width:85%;padding:10px 14px;border-radius:14px;font-family:var(--mono);font-size:.82rem;line-height:1.5;word-break:break-word;animation:popIn .2s ease}
+.bubble.you{background:linear-gradient(135deg,#2d1b69,#1e1b4b);border:1px solid var(--purple);align-self:flex-end;border-bottom-right-radius:4px}
+.bubble.cmd{background:linear-gradient(135deg,#0a2a2a,#071e1e);border:1px solid var(--cyan);align-self:flex-start;border-bottom-left-radius:4px;color:var(--cyan)}
+.bubble.sys{align-self:center;font-size:.7rem;color:var(--muted);background:transparent;padding:4px 0}
+.bubble.err{background:#2a0a0a;border:1px solid var(--red);align-self:flex-start;color:var(--red);border-bottom-left-radius:4px}
+@keyframes popIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
+
+/* ── MIC BUTTON ── */
+#mic-area{padding:16px;display:flex;flex-direction:column;align-items:center;gap:10px}
+#mic-btn{
+  width:88px;height:88px;border-radius:50%;border:none;cursor:pointer;
+  background:radial-gradient(circle,#9333ea,#5b21b6);
+  box-shadow:0 0 0 0 rgba(147,51,234,.5);
+  transition:.2s;position:relative;
+  display:flex;align-items:center;justify-content:center;
+}
+#mic-btn svg{width:38px;height:38px;fill:#fff}
+#mic-btn.listening{
+  background:radial-gradient(circle,#ef4444,#b91c1c);
+  animation:ripple 1.2s ease-out infinite;
+}
+@keyframes ripple{
+  0%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}
+  70%{box-shadow:0 0 0 24px rgba(239,68,68,0)}
+  100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}
+}
+#mic-hint{font-size:.65rem;letter-spacing:.1em;color:var(--muted);text-align:center}
+
+/* ── BOTTOM CONTROLS ── */
+#controls{display:flex;gap:8px;padding:0 16px 12px}
+#text-in{flex:1;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 14px;color:var(--text);font-family:var(--mono);font-size:.82rem;outline:none}
+#text-in:focus{border-color:var(--purple)}
+#send-btn{background:var(--purple);border:none;border-radius:12px;padding:10px 18px;color:#fff;font-family:var(--font);font-size:.75rem;cursor:pointer;white-space:nowrap}
+
+/* ── WAKE BTN ── */
+#wake-btn{width:calc(100% - 32px);margin:0 16px 10px;background:transparent;border:1px solid var(--border);border-radius:10px;padding:10px;color:var(--muted);font-family:var(--font);font-size:.7rem;letter-spacing:.1em;cursor:pointer;transition:.2s}
+#wake-btn:hover{border-color:var(--purple);color:var(--purple)}
+
+/* ── TTS SPEAKING INDICATOR ── */
+#speaking-bar{display:none;padding:4px 16px;text-align:center;font-size:.65rem;color:var(--cyan);letter-spacing:.15em;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ COMMANDER</h1>
+  <div id="online-pill" class="checking"><span class="pill-dot"></span><span id="pill-text">CHECKING THOMAS…</span></div>
+</header>
+
+<div id="convo">
+  <div class="bubble sys">Commander Voice v3.2 — Ready</div>
+  <div class="bubble sys">Tap the mic to speak, or type below</div>
+</div>
+
+<div id="speaking-bar" id="speaking-bar">🔊 SPEAKING…</div>
+
+<div id="mic-area">
+  <button id="mic-btn" onclick="toggleMic()">
+    <svg viewBox="0 0 24 24"><path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm7 11a1 1 0 0 1 2 0 9 9 0 0 1-8 8.94V23h-2v-2.06A9 9 0 0 1 3 12a1 1 0 0 1 2 0 7 7 0 0 0 14 0z"/></svg>
+  </button>
+  <div id="mic-hint">TAP TO SPEAK</div>
+</div>
+
+<div id="controls">
+  <input id="text-in" type="text" placeholder="Type a command…" autocomplete="off" autocorrect="off">
+  <button id="send-btn" onclick="sendText()">SEND</button>
+</div>
+<button id="wake-btn" onclick="wakeThomas()">⚡ WAKE THOMAS</button>
+
+<script>
+// ── CONFIG ──
+const BRIDGE_URL = location.origin;      // Brain acts as Bridge
+const THOMAS_IP  = '100.91.204.20';
+const BRIDGE_KEY = '';                   // Set if BRIDGE_KEY is configured
+
+// ── STATE ──
+let isListening = false, thomasOnline = false, speechRecog = null, isSpeaking = false;
+const convo = document.getElementById('convo');
+
+// ── HELPERS ──
+function addBubble(cls, text) {
+  const b = document.createElement('div');
+  b.className = 'bubble ' + cls;
+  b.textContent = text;
+  convo.appendChild(b);
+  convo.scrollTop = convo.scrollHeight;
+  return b;
+}
+
+// ── THOMAS STATUS ──
+async function checkThomas() {
+  const pill = document.getElementById('online-pill');
+  const txt  = document.getElementById('pill-text');
+  try {
+    const r = await fetch('/ping-thomas');
+    const d = await r.json();
+    thomasOnline = d.online;
+    if (d.online) {
+      pill.className = 'online';
+      txt.textContent = 'THOMAS ONLINE';
+    } else {
+      pill.className = 'offline';
+      txt.textContent = 'THOMAS OFFLINE';
+    }
+  } catch(e) {
+    pill.className = 'offline';
+    txt.textContent = 'BRAIN UNREACHABLE';
+    thomasOnline = false;
+  }
+}
+setInterval(checkThomas, 60000);
+checkThomas();
+
+// ── SEND MESSAGE TO COMMANDER ──
+async function sendToCommander(text) {
+  if (!text.trim()) return;
+  addBubble('you', text);
+  const loadBubble = addBubble('sys', '◈ processing…');
+  try {
+    let responseText = '';
+    if (thomasOnline) {
+      // Send direct to Commander via Bridge /message endpoint
+      const headers = { 'Content-Type': 'application/json' };
+      if (BRIDGE_KEY) headers['x-bridge-key'] = BRIDGE_KEY;
+      const r = await fetch('/message', {
+        method: 'POST', headers,
+        body: JSON.stringify({ message: text, source: 'phone_voice' })
+      });
+      const d = await r.json();
+      responseText = d.response || d.reply || d.answer || d.message || JSON.stringify(d);
+    } else {
+      // Offline fallback: query Brain memory
+      const r = await fetch('/ask', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: text })
+      });
+      const d = await r.json();
+      responseText = '[OFFLINE MODE — Brain reply]\n' + (d.answer || d.error || 'No response');
+    }
+    loadBubble.remove();
+    addBubble('cmd', responseText);
+    speak(responseText);
+  } catch(e) {
+    loadBubble.remove();
+    addBubble('err', 'Error: ' + e.message);
+  }
+}
+
+// ── TEXT-TO-SPEECH ──
+function speak(text) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  // Strip markdown and truncate for speech
+  const clean = text.replace(/[*_#\`]/g,'').replace(/\[.*?\]/g,'').substring(0, 300);
+  const utt = new SpeechSynthesisUtterance(clean);
+  utt.rate = 1.05; utt.pitch = 0.95; utt.volume = 1;
+  // Prefer a clear English voice
+  const voices = window.speechSynthesis.getVoices();
+  const pref = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Microsoft')));
+  if (pref) utt.voice = pref;
+  const bar = document.getElementById('speaking-bar');
+  utt.onstart  = () => { isSpeaking = true;  bar.style.display = 'block'; };
+  utt.onend    = () => { isSpeaking = false; bar.style.display = 'none'; };
+  utt.onerror  = () => { isSpeaking = false; bar.style.display = 'none'; };
+  window.speechSynthesis.speak(utt);
+}
+
+// ── SPEECH RECOGNITION ──
+function setupSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { addBubble('err', 'Speech recognition not supported on this browser/device.'); return null; }
+  const r = new SR();
+  r.lang = 'en-US'; r.continuous = false; r.interimResults = false; r.maxAlternatives = 1;
+  r.onresult = (e) => {
+    const t = e.results[0][0].transcript;
+    stopListening();
+    sendToCommander(t);
+  };
+  r.onerror = (e) => { stopListening(); addBubble('err', 'Mic error: ' + e.error); };
+  r.onend   = () => { if (isListening) stopListening(); };
+  return r;
+}
+
+function toggleMic() {
+  if (window.speechSynthesis?.speaking) { window.speechSynthesis.cancel(); return; }
+  if (isListening) { stopListening(); return; }
+  startListening();
+}
+
+function startListening() {
+  if (!speechRecog) speechRecog = setupSpeech();
+  if (!speechRecog) return;
+  try { speechRecog.start(); } catch(e) { speechRecog = setupSpeech(); if(speechRecog) speechRecog.start(); return; }
+  isListening = true;
+  document.getElementById('mic-btn').classList.add('listening');
+  document.getElementById('mic-hint').textContent = 'LISTENING…';
+}
+
+function stopListening() {
+  if (speechRecog) try { speechRecog.stop(); } catch(e) {}
+  isListening = false;
+  document.getElementById('mic-btn').classList.remove('listening');
+  document.getElementById('mic-hint').textContent = 'TAP TO SPEAK';
+}
+
+// ── TEXT INPUT ──
+function sendText() {
+  const inp = document.getElementById('text-in');
+  const t = inp.value.trim();
+  if (!t) return;
+  inp.value = '';
+  sendToCommander(t);
+}
+document.getElementById('text-in').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
+
+// ── WAKE THOMAS ──
+async function wakeThomas() {
+  const btn = document.getElementById('wake-btn');
+  btn.textContent = '⚡ SENDING MAGIC PACKET…';
+  btn.disabled = true;
+  try {
+    const headers = BRIDGE_KEY ? { 'x-bridge-key': BRIDGE_KEY, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    const r = await fetch('/wake', { method: 'POST', headers, body: '{}' });
+    const d = await r.json();
+    addBubble('sys', d.ok ? '⚡ Magic packet sent — Thomas booting in ~30s' : '✖ Wake failed: ' + (d.error||'unknown'));
+    setTimeout(() => { checkThomas(); btn.textContent = '⚡ WAKE THOMAS'; btn.disabled = false; }, 30000);
+  } catch(e) {
+    addBubble('err', 'Wake error: ' + e.message);
+    btn.textContent = '⚡ WAKE THOMAS'; btn.disabled = false;
+  }
+}
+
+// ── LOAD VOICES (async on some browsers) ──
+if (window.speechSynthesis) {
+  window.speechSynthesis.getVoices(); // prime
+  window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+}
+</script>
+</body>
+</html>`;
 
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;

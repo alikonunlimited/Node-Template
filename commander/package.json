@@ -1,0 +1,12 @@
+{
+  "name": "aikon-os-commander",
+  "version": "3.2.0",
+  "description": "AIKON-OS Commander — always-on AI terminal",
+  "main": "commander.js",
+  "scripts": {
+    "start": "node commander.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  }
+}

@@ -11,6 +11,20 @@ const fs        = require('fs');
 const path      = require('path');
 const { execSync, spawn } = require('child_process');
 
+// WebSocket — built-in ws module (ship ws in package.json, fallback to no-ws)
+let WebSocketServer = null;
+try { WebSocketServer = require('ws').Server; } catch(e) { /* ws not installed — HUD disabled */ }
+
+// Live HUD broadcast — all connected WebSocket clients
+const hudClients = new Set();
+function hudBroadcast(type, payload) {
+  if (!hudClients.size) return;
+  const msg = JSON.stringify({ t: type, ts: Date.now(), ...payload });
+  for (const ws of hudClients) {
+    try { if (ws.readyState === 1) ws.send(msg); } catch(e) { hudClients.delete(ws); }
+  }
+}
+
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   brainUrl:      process.env.BRAIN_URL || '',
@@ -168,7 +182,12 @@ function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   try { fs.appendFileSync(CONFIG.logFile, line + '\n'); } catch(e) {}
 }
-function print(msg) { process.stdout.write('\r' + msg + '\n> '); }
+function print(msg) {
+  const clean = msg.replace(/\x1b\[[0-9;]*m/g, '');
+  process.stdout.write('\r' + msg + '\n> ');
+  hudBroadcast('log', { msg: clean });
+  if (typeof global._phonePrintHook === 'function') global._phonePrintHook(clean);
+}
 
 // ─── HTTP HELPERS ─────────────────────────────────────────────────────────────
 function httpGet(url, headers = {}) {
@@ -930,6 +949,8 @@ async function handleCommand(input, rl) {
   const cmd   = parts[0].toLowerCase();
   const args  = parts.slice(1).join(' ');
 
+  hudBroadcast('cmd', { input: input.trim() });
+
   switch(cmd) {
 
     // ── SELF-UPDATE ──────────────────────────────────────────────────────────
@@ -1530,16 +1551,75 @@ async function main() {
   startBridgeLoop();
   startLearner();
 
-  // Health server — lets Brain/phone ping to check if Thomas is online
+  // Health + HUD WebSocket server + Phone relay
   const healthPort = process.env.COMMANDER_PORT || 3000;
-  http.createServer((req, res) => {
-    if (req.url === '/health') {
+  const healthServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-bridge-key');
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+    if (req.url === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, version: CONFIG.version, uptime: Math.floor(process.uptime()) }));
+
+    } else if (req.url === '/message' && req.method === 'POST') {
+      // Phone PWA / Bridge relay — receives a message string, runs handleCommand, returns response
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', async () => {
+        try {
+          const { message } = JSON.parse(body);
+          if (!message) { res.writeHead(400, {'Content-Type':'application/json'}); res.end(JSON.stringify({error:'No message'})); return; }
+          // Capture output by temporarily overriding print
+          const lines = [];
+          const origPrint = global._phonePrintHook;
+          global._phonePrintHook = (msg) => lines.push(msg);
+          // Process the command (use the existing rl-less path for voice commands)
+          try {
+            await handleCommand(message, null);
+          } catch(e) { lines.push('Error: ' + e.message); }
+          global._phonePrintHook = origPrint;
+          const response = lines.join('\n') || 'Command received.';
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ response, ok: true }));
+        } catch(e) {
+          res.writeHead(500, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+
     } else {
       res.writeHead(404); res.end();
     }
-  }).listen(healthPort, '0.0.0.0', () => {
+  });
+
+  // WebSocket for JARVIS HUD live feed
+  if (WebSocketServer) {
+    const wss = new WebSocketServer({ server: healthServer });
+    wss.on('connection', (ws) => {
+      hudClients.add(ws);
+      // Send initial snapshot
+      ws.send(JSON.stringify({ t: 'hello', version: CONFIG.version, uptime: Math.floor(process.uptime()), ts: Date.now() }));
+      ws.on('close', () => hudClients.delete(ws));
+      ws.on('error', () => hudClients.delete(ws));
+    });
+    // Broadcast live stats every 5s
+    setInterval(() => {
+      hudBroadcast('stats', {
+        version: CONFIG.version,
+        uptime: Math.floor(process.uptime()),
+        deepseek: CONFIG.deepseekReady || false,
+        tts: CONFIG.ttsAvail || false,
+        wake: CONFIG.wakeActive || false,
+        brain: CONFIG.brainConnected || false,
+        clients: hudClients.size,
+      });
+    }, 5000);
+    log(`HEALTH: WebSocket HUD feed enabled`);
+  }
+
+  healthServer.listen(healthPort, '0.0.0.0', () => {
     log(`HEALTH: listening on port ${healthPort}`);
   });
 }
