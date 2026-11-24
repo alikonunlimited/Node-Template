@@ -15,7 +15,7 @@ const {
   updateSpread,
 } = require('./engine');
 const { ensureHeaders, logTrade, logDailySummary } = require('./sheets');
-const { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory } = require('./db');
+const { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory, loadLatestBalance } = require('./db');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -364,7 +364,7 @@ async function start() {
     console.log(`[Server] Port ${PORT}`);
     await initDB();
     state.dbConnected=true;
-    const [savedTrades,savedEquity]=await Promise.all([loadTrades(),loadEquityHistory()]);
+    const [savedTrades,savedEquity,latestBalance]=await Promise.all([loadTrades(),loadEquityHistory(),loadLatestBalance()]);
     if(savedTrades.length){
       state.trades=savedTrades;
       state.balance=savedTrades.reduce((a,t)=>a+t.pl,STARTING_BALANCE);
@@ -375,6 +375,11 @@ async function start() {
       savedTrades.forEach(t=>recordOutcome(t));
       state.performanceSummary=getPerformanceSummary();
       addLog(`Restored ${savedTrades.length} trades | $${state.balance.toFixed(2)} | AI re-learned`,'info');
+    } else if(latestBalance !== null) {
+      // Fallback: trades query returned empty (DB hiccup on startup) but we have
+      // the last saved equity snapshot — use it so balance doesn't reset to default.
+      state.balance = latestBalance;
+      addLog(`[Startup] No trades loaded — balance restored from equity snapshot: $${latestBalance.toFixed(2)}`,'warn');
     }
     if(savedEquity.length)state.equityHistory=[STARTING_BALANCE,...savedEquity];
     await ensureHeaders();

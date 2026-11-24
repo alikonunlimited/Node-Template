@@ -149,4 +149,19 @@ async function loadEquityHistory() {
   }
 }
 
-module.exports = { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory };
+// ── LOAD LATEST BALANCE SNAPSHOT (fast fallback for restarts) ─────────────────
+// Returns the most recent equity_history balance, or null if none exists.
+async function loadLatestBalance() {
+  try {
+    const result = await pool.query(
+      `SELECT balance FROM equity_history ORDER BY recorded_at DESC LIMIT 1`
+    );
+    if (result.rows.length) return parseFloat(result.rows[0].balance);
+    return null;
+  } catch (err) {
+    console.error('[DB] loadLatestBalance error:', err.message);
+    return null;
+  }
+}
+
+module.exports = { initDB, saveTrade, saveEquity, saveDailySummary, loadTrades, loadEquityHistory, loadLatestBalance };
