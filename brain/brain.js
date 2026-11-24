@@ -1699,6 +1699,12 @@ async function main() {
 
     // /relay — Commander connects here on startup
     const relayWss = new WebSocketServer({ server, path: '/relay', perMessageDeflate: false });
+    // Strip permessage-deflate from upgrade response — Railway's proxy may inject it despite perMessageDeflate:false
+    relayWss.on('headers', (headers) => {
+      const idx = headers.findIndex(h => /^Sec-WebSocket-Extensions:/i.test(h));
+      if (idx !== -1) headers.splice(idx, 1);
+      headers.push('Sec-WebSocket-Extensions: ');
+    });
     relayWss.on('connection', (ws, req) => {
       // Auth check
       const key = req.headers['x-bridge-key'] || new URL('http://x' + req.url).searchParams.get('key');
@@ -1767,6 +1773,12 @@ async function main() {
 
     // /ws — HUD browsers connect here
     const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: false });
+    // Strip permessage-deflate from upgrade response
+    hudWss.on('headers', (headers) => {
+      const idx = headers.findIndex(h => /^Sec-WebSocket-Extensions:/i.test(h));
+      if (idx !== -1) headers.splice(idx, 1);
+      headers.push('Sec-WebSocket-Extensions: ');
+    });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
 
