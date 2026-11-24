@@ -26,12 +26,21 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '2.3',
+  version:       '2.4',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
   whisperModel:  'base',
   voiceEnabled:  true,
+  // Whisper path — tries PATH first, falls back to known install locations
+  whisperPaths:  [
+    'whisper',
+    'C:\\Python314\\Scripts\\whisper.exe',
+    'C:\\Python313\\Scripts\\whisper.exe',
+    'C:\\Python312\\Scripts\\whisper.exe',
+    process.env.USERPROFILE + '\\AppData\\Roaming\\Python\\Python314\\Scripts\\whisper.exe',
+    process.env.USERPROFILE + '\\AppData\\Local\\Programs\\Python\\Python314\\Scripts\\whisper.exe',
+  ],
 };
 
 // ─── MEMORY ───────────────────────────────────────────────────────────────────
@@ -347,10 +356,15 @@ print("[VOICE] Done.", flush=True)
   fs.writeFileSync(CONFIG.voiceRecorder, script);
 }
 
-function whisperAvailable() {
-  try { execSync('whisper --help', { stdio: 'ignore', timeout: 5000 }); return true; }
-  catch(e) { return false; }
+function findWhisper() {
+  for (const p of CONFIG.whisperPaths) {
+    try { execSync(`"${p}" --help`, { stdio: 'ignore', timeout: 5000 }); return p; }
+    catch(e) {}
+  }
+  return null;
 }
+
+function whisperAvailable() { return !!findWhisper(); }
 
 function recordVoice(seconds = 5) {
   return new Promise((resolve, reject) => {
@@ -371,8 +385,10 @@ function recordVoice(seconds = 5) {
 function transcribeWhisper(wavPath) {
   return new Promise((resolve, reject) => {
     print('⚙️  Transcribing...');
+    const whisperBin = findWhisper();
+    if (!whisperBin) { reject(new Error('Whisper not found. Run: pip install openai-whisper')); return; }
     const outDir = path.dirname(wavPath);
-    const proc = spawn('whisper', [wavPath,
+    const proc = spawn(whisperBin, [wavPath,
       '--model', CONFIG.whisperModel,
       '--language', 'en',
       '--output_format', 'txt',
@@ -443,7 +459,8 @@ async function handleCommand(input, rl) {
         const pyCheck = runShell('python --version');
         const sdCheck = runShell('python -c "import sounddevice; print(sounddevice.__version__)"');
         const sfCheck = runShell('python -c "import soundfile; print(soundfile.__version__)"');
-        const wsCheck = whisperAvailable() ? 'found ✅' : 'NOT FOUND ❌  →  pip install openai-whisper';
+        const whisperPath = findWhisper();
+        const wsCheck = whisperPath ? `found ✅  (${whisperPath})` : 'NOT FOUND ❌  →  pip install openai-whisper';
         print([
           `Python:       ${pyCheck}`,
           `sounddevice:  ${sdCheck}`,
