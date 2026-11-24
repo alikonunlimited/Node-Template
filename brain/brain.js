@@ -8,7 +8,7 @@ const https   = require('https');
 const http    = require('http');
 const { Pool } = require('pg');
 
-const VERSION = '1.0';
+const VERSION = '1.1';
 
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const pool = new Pool({
