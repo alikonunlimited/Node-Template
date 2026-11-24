@@ -26,7 +26,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '2.4',
+  version:       '2.5',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -441,12 +441,12 @@ async function handleCommand(input, rl) {
 
     // ── SELF-UPDATE ──────────────────────────────────────────────────────────
     case '/update': {
-      if (!args) {
-        print('Usage: /update <github_token>');
-        print(`Pulls commander/commander.js from ${CONFIG.updateRepo} and restarts.`);
+      const token = args.trim() || process.env.GITHUB_TOKEN || '';
+      if (!token) {
+        print('❌ No token. Set GITHUB_TOKEN env var (setx GITHUB_TOKEN "token" /M) or run /update <token>');
         break;
       }
-      await selfUpdate(args.trim());
+      await selfUpdate(token);
       break;
     }
 
@@ -529,7 +529,7 @@ async function handleCommand(input, rl) {
         `Voice:      ${CONFIG.voiceEnabled ? '🎙️  enabled (/v to record)' : '🔇 disabled (/voice on)'}`,
         `Memory:     ${memory.length} entries`,
         `Uptime:     ${Math.floor(process.uptime())}s`,
-        `Update:     /update <github_token>`,
+        `Update:     /update  (GITHUB_TOKEN: ${process.env.GITHUB_TOKEN ? '✅ set' : '❌ not set'})`,
       ].join('\n'));
       break;
     }
@@ -571,7 +571,7 @@ async function handleCommand(input, rl) {
     case '/help': {
       print(`
 COMMANDER v${CONFIG.version} COMMANDS:
-  /update <token>      — 🔄 Self-update from GitHub (alikonunlimited/Node-Template)
+  /update              — 🔄 Self-update from GitHub (uses GITHUB_TOKEN env var)
   /v [seconds]         — 🎙️  Record voice (default 5s), transcribe, execute
   /voice on|off        — Enable / disable voice input
   /voice setup         — Check voice dependencies
@@ -618,7 +618,7 @@ function printBanner() {
 ╠══════════════════════════════════════════════════════╣
 ║  Bridge:  ${bridgeStatus.padEnd(43)}║
 ╠══════════════════════════════════════════════════════╣
-║  /v to speak  |  /update <token> to self-update      ║
+║  /v to speak  |  /update to self-update               ║
 ╚══════════════════════════════════════════════════════╝
 `);
 }
