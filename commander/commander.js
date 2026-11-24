@@ -13,6 +13,7 @@ const { execSync, spawn } = require('child_process');
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
+  brainUrl:      process.env.BRAIN_URL || '',
   ollamaHost:    '127.0.0.1',
   ollamaPort:    11434,
   ollamaModel:   'phi3:mini',
@@ -30,7 +31,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.0',
+  version:       '3.1',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -468,6 +469,42 @@ function startLearner() {
   setInterval(learnCycle, CONFIG.learnInterval);
 }
 
+// ─── BRAIN SYNC ───────────────────────────────────────────────────────────────
+async function syncFromBrain() {
+  if (!CONFIG.brainUrl) return;
+  try {
+    const lastSync = (() => {
+      try {
+        const f = path.join('D:\\AIKON-OS', 'brain_sync.json');
+        if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f,'utf8')).last_sync;
+      } catch(e) {}
+      return new Date(Date.now() - 86400000).toISOString(); // default: last 24h
+    })();
+
+    print(`\n🧠 Brain sync — fetching memories since ${lastSync.split('T')[0]}...`);
+    const url = `${CONFIG.brainUrl}/sync?since=${encodeURIComponent(lastSync)}`;
+    const raw = await httpGet(url, { 'x-bridge-key': CONFIG.bridgeKey });
+    const data = JSON.parse(raw);
+
+    if (data.count > 0) {
+      for (const item of data.items) {
+        chromaAdd(item.branch, { content: item.content, source: item.source, score: item.score });
+      }
+      // Save sync timestamp
+      try {
+        const f = path.join('D:\\AIKON-OS', 'brain_sync.json');
+        fs.writeFileSync(f, JSON.stringify({ last_sync: new Date().toISOString() }));
+      } catch(e) {}
+      print(`🧠 Brain sync complete — ${data.count} new memories loaded across all branches`);
+      log(`BRAIN_SYNC: imported ${data.count} items`);
+    } else {
+      print(`🧠 Brain sync — up to date`);
+    }
+  } catch(e) {
+    log(`BRAIN_SYNC_ERR: ${e.message}`);
+  }
+}
+
 // ─── TRADER CHECK ─────────────────────────────────────────────────────────────
 async function checkTrader() {
   try {
@@ -901,6 +938,91 @@ async function handleCommand(input, rl) {
       break;
     }
 
+    // ── BRAIN ────────────────────────────────────────────────────────────────
+    case '/brain': {
+      if (!CONFIG.brainUrl) { print('❌ Brain not configured. Set BRAIN_URL env var.'); break; }
+      if (args === 'sync') {
+        await syncFromBrain();
+        break;
+      }
+      if (args === 'status') {
+        try {
+          const raw = await httpGet(`${CONFIG.brainUrl}/status`, { 'x-bridge-key': CONFIG.bridgeKey });
+          const data = JSON.parse(raw);
+          print([
+            '🧠 BRAIN STATUS (Render — 24/7)',
+            `Version:    v${data.version}`,
+            `Uptime:     ${Math.floor(data.uptime/60)}min`,
+            `Cycles:     ${data.cycle_count}`,
+            `Memories:   ${data.total_memories}`,
+            `Branches:   ${data.branches_active} active`,
+            `Last cycle: ${data.last_cycle?.split('T')[1]?.split('.')[0] || 'N/A'}`,
+          ].join('\n'));
+        } catch(e) { print(`❌ Brain unreachable: ${e.message}`); }
+        break;
+      }
+      if (args === 'opportunities') {
+        try {
+          const raw = await httpGet(`${CONFIG.brainUrl}/opportunities`, { 'x-bridge-key': CONFIG.bridgeKey });
+          const data = JSON.parse(raw);
+          print(`💡 TOP OPPORTUNITIES (${data.count}):`);
+          data.items.slice(0,5).forEach(i =>
+            print(`  [${i.branch}] score=${i.score?.toFixed(1)} — ${i.content.substring(0,150)}`)
+          );
+        } catch(e) { print(`❌ ${e.message}`); }
+        break;
+      }
+      print('Brain: /brain status | /brain sync | /brain opportunities');
+      break;
+    }
+
+    // ── BRANCH ───────────────────────────────────────────────────────────────
+    case '/branch': {
+      if (args.startsWith('add ')) {
+        const parts = args.slice(4).split('|').map(s => s.trim());
+        const [slug, name, ...kwds] = parts;
+        if (!slug || !name) { print('Usage: /branch add <slug> | <name> | keyword1,keyword2'); break; }
+        const keywords = kwds[0] ? kwds[0].split(',').map(s=>s.trim()) : [];
+        // Add to local ChromaDB branches
+        BRANCHES[slug] = { name, keywords };
+        chromaAdd('aikon_os', { insight: `New branch added: ${slug} — ${name}` });
+        print(`✅ Branch "${name}" added locally.`);
+        // Also add to Brain on Render if configured
+        if (CONFIG.brainUrl) {
+          try {
+            const body = JSON.stringify({ slug, name, keywords, news_queries: [`${name} business 2024`, `${name} automation opportunities`] });
+            await new Promise((resolve, reject) => {
+              const u = new URL(`${CONFIG.brainUrl}/branch`);
+              const req = https.request({
+                hostname: u.hostname, port: 443, path: u.pathname,
+                method: 'POST',
+                headers: { 'Content-Type':'application/json', 'Content-Length': Buffer.byteLength(body), 'x-bridge-key': CONFIG.bridgeKey },
+                timeout: 10000
+              }, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>resolve(d)); });
+              req.on('error', reject); req.write(body); req.end();
+            });
+            print(`🧠 Branch also registered with Brain — 24/7 learning starts next cycle.`);
+          } catch(e) { print(`⚠️  Local only (Brain sync failed: ${e.message})`); }
+        }
+        break;
+      }
+      if (args === 'list') {
+        print('📋 LOCAL BRANCHES:');
+        Object.entries(BRANCHES).forEach(([k,v]) => print(`  ${k}: ${v.name}`));
+        if (CONFIG.brainUrl) {
+          try {
+            const raw = await httpGet(`${CONFIG.brainUrl}/branches`, { 'x-bridge-key': CONFIG.bridgeKey });
+            const data = JSON.parse(raw);
+            print(`\n🧠 BRAIN BRANCHES (${data.branches.length}):`);
+            data.branches.forEach(b => print(`  ${b.active ? '✅' : '⬜'} ${b.slug}: ${b.name}`));
+          } catch(e) {}
+        }
+        break;
+      }
+      print('Branch: /branch add <slug> | <Name> | keyword1,keyword2\n        /branch list');
+      break;
+    }
+
     case '/shell': {
       if (!args) { print('Usage: /shell <command>'); break; }
       print(`⚙️  Running: ${args}`);
@@ -976,7 +1098,7 @@ function printBanner() {
 ╠══════════════════════════════════════════════════════╣
 ║  Trader:   xauusd-trader-80p0.onrender.com           ║
 ║  Models:   phi3:mini → deepseek-r1:7b (routing)      ║
-║  Learner:  24/7 background (trader+news+opportunities)║
+║  Brain:    Render 24/7 learner (all businesses)       ║
 ╠══════════════════════════════════════════════════════╣
 ║  /setup deepseek  |  /v to speak  |  /update         ║
 ╚══════════════════════════════════════════════════════╝
@@ -1025,6 +1147,15 @@ async function backgroundStartup() {
       print('🎙️  Voice ready. /v to speak.');
     }
   }, 3500);
+
+  // Sync from Brain (Render 24/7 learner) — picks up everything missed while Thomas was off
+  setTimeout(async () => {
+    if (CONFIG.brainUrl) {
+      await syncFromBrain();
+    } else {
+      print('💡 Set BRAIN_URL env var to enable 24/7 cloud learning sync.');
+    }
+  }, 5000);
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
