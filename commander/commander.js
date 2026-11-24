@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.5 — Reverse Brain Relay + WS Keep-Alive
+// AIKON-OS Commander v3.6 — SSE/HTTP POST Brain Relay (bypasses Railway proxy compression)
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -15,7 +15,7 @@ const { execSync, spawn } = require('child_process');
 let WebSocketServer = null;
 try { WebSocketServer = require('ws').Server; } catch(e) { /* ws not installed — HUD disabled */ }
 
-// Live HUD broadcast — all connected WebSocket clients + Brain relay
+// Live HUD broadcast — all connected WebSocket clients + Brain relay (HTTP POST)
 const hudClients = new Set();
 function hudBroadcast(type, payload) {
   const msg = JSON.stringify({ t: type, ts: Date.now(), ...payload });
@@ -23,9 +23,9 @@ function hudBroadcast(type, payload) {
   for (const ws of hudClients) {
     try { if (ws.readyState === 1) ws.send(msg); } catch(e) { hudClients.delete(ws); }
   }
-  // Brain relay (outbound socket to Railway)
-  if (CONFIG._relayWs && CONFIG._relayWs.readyState === 1) {
-    try { CONFIG._relayWs.send(msg); } catch(e) {}
+  // Brain relay — enqueue for next HTTP POST (fire-and-forget)
+  if (CONFIG.brainConnected && CONFIG._relayQueue) {
+    CONFIG._relayQueue.push(JSON.parse(msg));
   }
 }
 
@@ -49,7 +49,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.5',
+  version:       '3.6',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -290,89 +290,100 @@ function startBridgeLoop() {
   setTimeout(bridgeHeartbeat, 2000);
 }
 
-// ─── BRAIN RELAY (v3.4) ──────────────────────────────────────────────────────
-// Thomas dials OUT to Brain /relay — no inbound firewall rules needed.
-// Brain receives this socket and forwards it to HUD browsers.
-let WebSocketClient = null;
-try { WebSocketClient = require('ws'); } catch(e) { /* ws not installed */ }
+// ─── BRAIN RELAY (v3.6 — HTTP POST, bypasses Railway proxy compression) ───────
+// Railway's nginx proxy forces WebSocket permessage-deflate at the infrastructure
+// level, causing RSV1 frame errors regardless of perMessageDeflate:false settings.
+// Fix: use plain HTTP POST to /relay/push — no WebSocket upgrade, no proxy interference.
+// Commander POSTs events every 5s; Brain returns queued commands in the response.
 
 function startBrainRelay() {
   if (!CONFIG.brainUrl) {
     log('RELAY: BRAIN_URL not set — skipping outbound relay');
     return;
   }
-  if (!WebSocketClient) {
-    log('RELAY: ws package not installed — skipping outbound relay');
-    return;
-  }
 
-  const wsUrl = CONFIG.brainUrl
-    .replace(/^https:\/\//, 'wss://')
-    .replace(/^http:\/\//, 'ws://')
-    .replace(/\/$/, '') + '/relay';
+  const pushUrl = CONFIG.brainUrl.replace(/\/$/, '') + '/relay/push';
+  CONFIG._relayQueue = [];   // events queued for next POST
+  CONFIG.brainConnected = false;
 
-  const headers = {};
+  const headers = { 'Content-Type': 'application/json' };
   if (CONFIG.bridgeKey) headers['x-bridge-key'] = CONFIG.bridgeKey;
 
-  function connect() {
-    log(`RELAY: connecting to Brain at ${wsUrl}`);
-    let ws;
-    try {
-      // Railway's proxy forces permessage-deflate regardless of perMessageDeflate:false.
-      // Set to true so ws actually negotiates and decompresses — avoids RSV1 frame errors.
-      ws = new WebSocketClient(wsUrl, { headers, handshakeTimeout: 10000, perMessageDeflate: true });
-    } catch(e) {
-      log(`RELAY: connect error — ${e.message} — retry in 30s`);
-      setTimeout(connect, 30000);
-      return;
-    }
-
-    ws.on('open', () => {
-      CONFIG.brainConnected = true;
-      log('RELAY: connected to Brain ✓ — HUD will show LIVE');
-      // Send initial hello with stats
-      const hello = JSON.stringify({
-        t: 'hello', version: CONFIG.version,
-        uptime: Math.floor(process.uptime()), ts: Date.now()
+  // Helper: HTTP POST using built-in https/http
+  function postJson(url, body) {
+    return new Promise((resolve, reject) => {
+      const data = JSON.stringify(body);
+      const parsed = new URL(url);
+      const mod = parsed.protocol === 'https:' ? require('https') : require('http');
+      const req = mod.request({
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        headers: { ...headers, 'Content-Length': Buffer.byteLength(data) },
+        timeout: 8000
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+          catch(e) { resolve({ status: res.statusCode, body: {} }); }
+        });
       });
-      ws.send(hello);
-      // Pipe all hudBroadcast calls through this socket too
-      CONFIG._relayWs = ws;
-
-      // Keep-alive ping every 5s — use WS protocol ping (not JSON) so Render proxy doesn't interfere
-      const pingInterval = setInterval(() => {
-        if (ws.readyState === 1) {
-          try { ws.ping(); } catch(e) {}
-        } else {
-          clearInterval(pingInterval);
-        }
-      }, 5000);
-      ws._pingInterval = pingInterval;
-    });
-
-    ws.on('message', (data) => {
-      // Commands sent from HUD browser via Brain
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.command) handleCommand(msg.command, null).catch(() => {});
-      } catch(e) {}
-    });
-
-    ws.on('close', () => {
-      CONFIG.brainConnected = false;
-      CONFIG._relayWs = null;
-      if (ws._pingInterval) clearInterval(ws._pingInterval);
-      log('RELAY: disconnected from Brain — retry in 15s');
-      setTimeout(connect, 15000);
-    });
-
-    ws.on('error', (e) => {
-      log(`RELAY: error — ${e.message}`);
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(data);
+      req.end();
     });
   }
 
-  // Start after a short delay so health server is up first
-  setTimeout(connect, 3000);
+  async function relayTick() {
+    // Drain queue — send all buffered events, plus a heartbeat if queue is empty
+    const events = CONFIG._relayQueue.splice(0);
+    if (events.length === 0) {
+      // Send heartbeat to keep Brain's watchdog happy
+      events.push({ t: 'heartbeat', uptime: Math.floor(process.uptime()), ts: Date.now() });
+    }
+
+    // POST all events in a batch (send each individually for simplicity)
+    for (const event of events) {
+      try {
+        const result = await postJson(pushUrl, event);
+        if (result.status === 200) {
+          if (!CONFIG.brainConnected) {
+            CONFIG.brainConnected = true;
+            log('RELAY: connected to Brain via HTTP POST ✓ — HUD will show LIVE');
+            // Send hello so HUD gets version info
+            CONFIG._relayQueue.push({
+              t: 'hello', version: CONFIG.version,
+              uptime: Math.floor(process.uptime()), ts: Date.now()
+            });
+          }
+          // Process any commands Brain queued for us
+          const cmds = result.body.commands || [];
+          for (const cmd of cmds) {
+            if (cmd.command) {
+              log(`RELAY: received command from HUD: ${cmd.command}`);
+              handleCommand(cmd.command, null).catch(() => {});
+            }
+          }
+        } else if (result.status === 401) {
+          log('RELAY: unauthorized — check BRIDGE_KEY');
+        }
+      } catch(e) {
+        if (CONFIG.brainConnected) {
+          CONFIG.brainConnected = false;
+          log(`RELAY: Brain unreachable — ${e.message}`);
+        }
+      }
+    }
+  }
+
+  // Start after a short delay, then POST every 5s
+  setTimeout(() => {
+    relayTick();
+    setInterval(relayTick, 5000);
+  }, 3000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
