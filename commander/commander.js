@@ -31,7 +31,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.1',
+  version:       '3.2',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -45,6 +45,21 @@ const CONFIG = {
     (process.env.USERPROFILE || '') + '\\AppData\\Roaming\\Python\\Python314\\Scripts\\whisper.exe',
     (process.env.USERPROFILE || '') + '\\AppData\\Local\\Programs\\Python\\Python314\\Scripts\\whisper.exe',
   ],
+  // TTS / Wake word
+  voiceSpeak:    path.join(__dirname, 'voice_speak.py'),
+  wakeWord:      path.join(__dirname, 'wake_word.py'),
+  ttsEnabled:    true,
+  ttsRate:       175,
+  wakeEnabled:   false,  // enable with /wake on after vosk model downloaded
+  // Push notifications (ntfy.sh — free, no account needed)
+  ntfyTopic:     process.env.NTFY_TOPIC || '',  // set to your unique topic e.g. aikon-commander-abc123
+  // Teams
+  teams: {
+    trader:   { name: 'Trader Team',   model: 'deepseek-r1:7b', branch: 'trader',   active: true },
+    biz:      { name: 'Biz Team',      model: 'deepseek-r1:7b', branch: 'opportunities', active: true },
+    research: { name: 'Research Team', model: 'phi3:mini',       branch: 'opportunities', active: true },
+    roblox:   { name: 'Roblox Team',   model: 'phi3:mini',       branch: 'roblox',   active: true },
+  },
   // Approval queue — big decisions wait here
   pendingApprovals: [],
   deepseekReady: false,
@@ -626,6 +641,181 @@ function runShell(cmd) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ─── TTS — COMMANDER TALKS BACK ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function speak(text) {
+  if (!CONFIG.ttsEnabled) return;
+  if (!fs.existsSync(CONFIG.voiceSpeak)) return;
+  // Truncate very long responses for speech
+  const spoken = text.replace(/[*_`#]/g, '').substring(0, 300);
+  try {
+    spawn('python', [CONFIG.voiceSpeak, spoken, String(CONFIG.ttsRate)], {
+      stdio: 'ignore', detached: false
+    });
+  } catch(e) { log(`TTS_ERR: ${e.message}`); }
+}
+
+function ttsAvailable() {
+  return fs.existsSync(CONFIG.voiceSpeak);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── PUSH NOTIFICATIONS — ntfy.sh ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function notify(title, message, priority = 'default') {
+  if (!CONFIG.ntfyTopic) return;
+  try {
+    const body = message.substring(0, 500);
+    const req = https.request({
+      hostname: 'ntfy.sh',
+      path: `/${CONFIG.ntfyTopic}`,
+      method: 'POST',
+      headers: {
+        'Title':    title,
+        'Priority': priority,  // min low default high urgent
+        'Content-Type': 'text/plain',
+        'Content-Length': Buffer.byteLength(body)
+      },
+      timeout: 8000
+    }, res => { res.resume(); });
+    req.on('error', e => log(`NTFY_ERR: ${e.message}`));
+    req.write(body);
+    req.end();
+    log(`NTFY: [${priority}] ${title} — ${body.substring(0,80)}`);
+  } catch(e) { log(`NTFY_ERR: ${e.message}`); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── WAKE WORD ────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let wakeProc = null;
+
+function startWakeWord() {
+  if (!CONFIG.wakeEnabled) return;
+  if (!fs.existsSync(CONFIG.wakeWord)) return;
+  if (wakeProc) return; // already running
+
+  print('👂 Wake word active — say "Commander" to speak');
+  wakeProc = spawn('python', [CONFIG.wakeWord], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  wakeProc.stdout.on('data', async d => {
+    const line = d.toString().trim();
+    if (line.startsWith('WAKE:') || line.startsWith('WAKE_PARTIAL:')) {
+      print('\n🎙️  Wake word detected! Listening...');
+      speak('Yes?');
+      const text = await voiceInput(5);
+      if (text) {
+        if (text.trim().toLowerCase().startsWith('/')) {
+          await handleCommand(text.trim(), null);
+        } else {
+          print('🤔 Thinking...');
+          remember('user', `[wake] ${text}`);
+          try {
+            const { reply, model } = await askOllama(text, memory.filter(m => m.role !== 'note'));
+            print(`\nCommander [${model}]: ${reply}\n`);
+            speak(reply);
+            remember('assistant', reply);
+          } catch(e) { print(`❌ ${e.message}`); }
+        }
+      }
+    } else if (line === 'VOSK_MISSING') {
+      print('⚠️  vosk not installed: pip install vosk sounddevice');
+      CONFIG.wakeEnabled = false;
+    } else if (line.startsWith('MODEL_MISSING:')) {
+      print(`⚠️  Vosk model missing. Download vosk-model-small-en-us from alphacephei.com/vosk/models`);
+      print(`    Extract to: D:\\AIKON-OS\\models\\vosk-model-small-en-us`);
+      CONFIG.wakeEnabled = false;
+    }
+  });
+
+  wakeProc.on('close', code => {
+    wakeProc = null;
+    if (CONFIG.wakeEnabled) {
+      log(`WAKE: process exited (${code}), restarting in 5s`);
+      setTimeout(startWakeWord, 5000);
+    }
+  });
+  wakeProc.on('error', e => { log(`WAKE_ERR: ${e.message}`); wakeProc = null; });
+}
+
+function stopWakeWord() {
+  CONFIG.wakeEnabled = false;
+  if (wakeProc) { wakeProc.kill(); wakeProc = null; }
+  print('👂 Wake word disabled.');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── TEAMS ───────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function runTeam(teamKey, task) {
+  const team = CONFIG.teams[teamKey];
+  if (!team) return `Unknown team: ${teamKey}`;
+  if (!team.active) return `${team.name} is inactive.`;
+
+  print(`\n🤖 ${team.name} working on: ${task}`);
+  log(`TEAM [${teamKey}]: ${task}`);
+
+  // Pull relevant memory from ChromaDB
+  const context = chromaQuery(team.branch, task, 5);
+  const contextStr = context.length
+    ? '\n\nRELEVANT MEMORY:\n' + context.map(e => `- ${e.content || e.insight}`).join('\n')
+    : '';
+
+  const systemPrompt = {
+    trader:   `You are the Trader Team for AIKON-OS. You analyze XAU/USD market conditions, evaluate trade signals, and recommend actions. You are precise and data-driven. Big trades require Al iKon approval.`,
+    biz:      `You are the Biz Team for AIKON-OS. You evaluate business opportunities, draft plans, and identify revenue actions across all Al iKon businesses. Flag anything requiring budget or major commitment for approval.`,
+    research: `You are the Research Team for AIKON-OS. You research markets, competitors, trends, and opportunities. Provide concise, actionable summaries with sources when possible.`,
+    roblox:   `You are the Roblox Team for AIKON-OS. You manage Silent Santa, Magic Moments, Castle Kings, Dead to Dawn, Lemonade Rush, and Stick Fights. You optimize game mechanics, monetization, and updates.`,
+  }[teamKey] || `You are the ${team.name} for AIKON-OS.`;
+
+  const model = (teamKey === 'trader' || teamKey === 'biz') && CONFIG.deepseekReady
+    ? CONFIG.deepseekModel : CONFIG.ollamaModel;
+
+  try {
+    const messages = [
+      { role: 'system', content: systemPrompt + contextStr },
+      { role: 'user',   content: task }
+    ];
+    const body = JSON.stringify({ model, messages, stream: false });
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
+        path: '/api/chat', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: 120000
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => { try { resolve(JSON.parse(d).message?.content || 'No response'); } catch(e) { resolve(d); } });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(body); req.end();
+    });
+
+    // Check if approval needed
+    const needsApproval = /\b(deploy|send|post|publish|buy|sell|spend|charge|delete|remove|create account|wire)\b/i.test(result);
+    if (needsApproval) {
+      queueApproval(`${team.name}: ${task.substring(0,60)}`, result.substring(0,200), async () => {
+        print(`✅ ${team.name} action approved.`);
+        await notify(`${team.name} Approved`, result.substring(0, 200), 'high');
+      });
+    }
+
+    chromaAdd(team.branch, { content: `[${team.name}] Task: ${task} → ${result.substring(0,200)}`, source: 'team' });
+    log(`TEAM [${teamKey}/${model}]: ${result.substring(0,200)}`);
+    return `🤖 ${team.name} [${model}]:\n${result}`;
+  } catch(e) {
+    log(`TEAM_ERR [${teamKey}]: ${e.message}`);
+    return `❌ ${team.name} error: ${e.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ─── VOICE / WHISPER STT ─────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -882,10 +1072,97 @@ async function handleCommand(input, rl) {
         try {
           const { reply, model } = await askOllama(text, memory.filter(m => m.role !== 'note'));
           print(`\nCommander [${model}]: ${reply}\n`);
+          speak(reply);
           remember('assistant', reply);
           log(`OLLAMA (voice/${model}): ${reply.substring(0,200)}`);
         } catch(e) { print(`❌ Ollama error: ${e.message}`); }
       }
+      break;
+    }
+
+    // ── TTS / WAKE / NOTIFY / TEAMS ──────────────────────────────────────────
+    case '/tts': {
+      if (args === 'on')  { CONFIG.ttsEnabled = true;  print('🔊 TTS enabled — Commander will speak responses.'); break; }
+      if (args === 'off') { CONFIG.ttsEnabled = false; print('🔇 TTS disabled.'); break; }
+      if (args.startsWith('say ')) {
+        const msg = args.slice(4);
+        speak(msg); print(`🔊 Speaking: "${msg}"`);
+        break;
+      }
+      if (args === 'check') {
+        const pyOk = runShell('python --version').includes('Python');
+        const ttsOk = fs.existsSync(CONFIG.voiceSpeak);
+        const pkgOk = runShell('python -c "import pyttsx3; print(pyttsx3.__version__)"');
+        print([
+          `voice_speak.py: ${ttsOk ? '✅ found' : '❌ missing'}`,
+          `Python:         ${pyOk ? '✅' : '❌'}`,
+          `pyttsx3:        ${pkgOk.includes('.') ? '✅ ' + pkgOk : '❌  → pip install pyttsx3'}`,
+          `TTS enabled:    ${CONFIG.ttsEnabled ? '✅' : '⬜'}`,
+        ].join('\n'));
+        break;
+      }
+      print('TTS: /tts on|off|check | /tts say <text>');
+      break;
+    }
+
+    case '/wake': {
+      if (args === 'on')  { CONFIG.wakeEnabled = true;  startWakeWord(); break; }
+      if (args === 'off') { stopWakeWord(); break; }
+      if (args === 'check') {
+        const model = fs.existsSync('D:\\AIKON-OS\\models\\vosk-model-small-en-us');
+        const voskCheck = runShell('python -c "from vosk import Model; print(\'ok\')"');
+        const sdCheck   = runShell('python -c "import sounddevice; print(sounddevice.__version__)"');
+        print([
+          `vosk model:     ${model ? '✅ found' : '❌ missing — download from alphacephei.com/vosk/models'}`,
+          `vosk pkg:       ${voskCheck === 'ok' ? '✅' : '❌  → pip install vosk'}`,
+          `sounddevice:    ${sdCheck.includes('.') ? '✅ ' + sdCheck : '❌  → pip install sounddevice'}`,
+          `Wake enabled:   ${CONFIG.wakeEnabled ? '✅' : '⬜'}`,
+          '',
+          'Model path: D:\\AIKON-OS\\models\\vosk-model-small-en-us',
+          'Download:   https://alphacephei.com/vosk/models → vosk-model-small-en-us-0.22.zip',
+        ].join('\n'));
+        break;
+      }
+      print('Wake: /wake on | /wake off | /wake check');
+      break;
+    }
+
+    case '/notify': {
+      if (!CONFIG.ntfyTopic) {
+        print('❌ ntfy not configured. Set NTFY_TOPIC env var:\n  setx NTFY_TOPIC "aikon-commander-<yourname>"\nThen subscribe in ntfy app to that topic.');
+        break;
+      }
+      if (args.startsWith('test')) {
+        await notify('Commander Test', 'Push notifications working! 🚀', 'default');
+        print(`✅ Test notification sent to topic: ${CONFIG.ntfyTopic}`);
+        break;
+      }
+      if (args) {
+        await notify('Commander', args, 'default');
+        print(`📱 Sent: ${args}`);
+        break;
+      }
+      print(`📱 ntfy topic: ${CONFIG.ntfyTopic}\n/notify test | /notify <message>`);
+      break;
+    }
+
+    case '/team': {
+      const [teamKey, ...taskParts] = args.split(' ');
+      const task = taskParts.join(' ');
+      if (!teamKey) {
+        print('Teams: ' + Object.entries(CONFIG.teams)
+          .map(([k,v]) => `${v.active ? '✅' : '⬜'} ${k}: ${v.name}`)
+          .join('\n       '));
+        print('/team <key> <task>  — run a team on a task');
+        print('/team <key> on|off  — activate/deactivate team');
+        break;
+      }
+      if (task === 'on')  { if (CONFIG.teams[teamKey]) { CONFIG.teams[teamKey].active = true;  print(`✅ ${CONFIG.teams[teamKey].name} activated.`);  } break; }
+      if (task === 'off') { if (CONFIG.teams[teamKey]) { CONFIG.teams[teamKey].active = false; print(`⬜ ${CONFIG.teams[teamKey].name} deactivated.`); } break; }
+      if (!task) { print('Usage: /team <trader|biz|research|roblox> <task>'); break; }
+      const result = await runTeam(teamKey, task);
+      print(result);
+      if (CONFIG.ttsEnabled) speak(result.substring(0, 200));
       break;
     }
 
@@ -922,13 +1199,21 @@ async function handleCommand(input, rl) {
 
     case '/status': {
       const dsReady = await checkDeepseek();
+      const teamsStr = Object.entries(CONFIG.teams)
+        .map(([k,v]) => `${v.active ? '✅' : '⬜'} ${k}`)
+        .join(' | ');
       print([
         '🖥️  AIKON-OS STATUS',
         `Commander:  ✅ v${CONFIG.version} running`,
         `Bridge:     ${CONFIG.bridgeUrl ? '✅ ' + CONFIG.bridgeUrl : '❌ not configured'}`,
+        `Brain:      ${CONFIG.brainUrl ? '✅ ' + CONFIG.brainUrl : '⬜ not configured'}`,
         `Phi-3:      ✅ ${CONFIG.ollamaModel} (fast routing)`,
         `DeepSeek:   ${dsReady ? '✅ ' + CONFIG.deepseekModel + ' (reasoning)' : '⬜ not loaded — run /setup deepseek'}`,
-        `Voice:      ${CONFIG.voiceEnabled ? '🎙️  enabled' : '🔇 disabled'}`,
+        `Voice STT:  ${CONFIG.voiceEnabled ? '🎙️  enabled' : '🔇 disabled'}`,
+        `TTS:        ${CONFIG.ttsEnabled ? '🔊 enabled' : '🔇 disabled'} — /tts on|off|check`,
+        `Wake word:  ${CONFIG.wakeEnabled ? '👂 listening' : '⬜ disabled'} — /wake on|check`,
+        `Push ntfy:  ${CONFIG.ntfyTopic ? '📱 ' + CONFIG.ntfyTopic : '⬜ not set — set NTFY_TOPIC'}`,
+        `Teams:      ${teamsStr}`,
         `Learner:    ✅ running (every ${CONFIG.learnInterval/60000}min)`,
         `Memory:     ${memory.length} session entries`,
         `Chroma:     ${Object.entries(chromaMemory.collections).reduce((a,[,v]) => a + v.length, 0)} indexed entries`,
@@ -1051,7 +1336,14 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /setup deepseek      — ⬇️  Install DeepSeek R1 7b on D: drive (one-time)
   /models              — 🤖 Show loaded models + routing
   /v [seconds]         — 🎙️  Voice input (default 5s)
-  /voice on|off|setup  — Voice control
+  /voice on|off|setup  — Voice STT control
+  /tts on|off|check    — 🔊 Text-to-speech (Commander talks back)
+  /tts say <text>      — Speak any text aloud now
+  /wake on|off|check   — 👂 Wake word ("Commander" triggers listening)
+  /notify <msg>        — 📱 Push notification to your phone (ntfy.sh)
+  /notify test         — Test push notification
+  /team                — 🤖 List teams (Trader/Biz/Research/Roblox)
+  /team <key> <task>   — Run a team on a task
   /trader, /report     — 📊 Live trader status
   /learn               — 🧠 Run background learn cycle now
   /memory [branch]     — 📚 Show ChromaDB memory
@@ -1062,15 +1354,25 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /approve <id>        — ✅ Approve a queued action
   /deny <id>           — 🚫 Deny a queued action
   /bridge status|history|send — 🌉 Bridge control
+  /brain status|sync|opportunities — 🧠 Brain (Render 24/7) control
+  /branch add|list     — 🌿 Manage business branches
   /status              — 🖥️  Full system status
   /shell <cmd>         — ⚙️  Run shell command
-  /migrate [dest]      — 📦 Copy AIKON-OS F: → D:
   /note <text>         — 📝 Save a note
   /notes               — Show notes
   /clear               — Clear screen
   /exit                — Quit
 
+Teams: trader | biz | research | roblox
 Branches: trader | roblox | agency | aikon_os | opportunities
+
+SETUP (one-time):
+  TTS:       pip install pyttsx3
+  Wake word: pip install vosk sounddevice
+             Download: alphacephei.com/vosk/models → vosk-model-small-en-us
+             Extract to: D:\\AIKON-OS\\models\\vosk-model-small-en-us
+  Push ntfy: setx NTFY_TOPIC "aikon-commander-<yourname>"
+             Install ntfy app → subscribe to your topic
 `);
       break;
     }
@@ -1094,13 +1396,14 @@ function printBanner() {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
 ║       AIKON-OS COMMANDER v${CONFIG.version}                      ║
-║       Al iKon Unlimited LLC    🧠 🎙️  🔄            ║
+║       Al iKon Unlimited LLC  🧠 🎙️ 🔊 📱 🤖        ║
 ╠══════════════════════════════════════════════════════╣
 ║  Trader:   xauusd-trader-80p0.onrender.com           ║
 ║  Models:   phi3:mini → deepseek-r1:7b (routing)      ║
 ║  Brain:    Render 24/7 learner (all businesses)       ║
+║  Teams:    Trader | Biz | Research | Roblox           ║
 ╠══════════════════════════════════════════════════════╣
-║  /setup deepseek  |  /v to speak  |  /update         ║
+║  /tts on  |  /wake on  |  /notify test  |  /update   ║
 ╚══════════════════════════════════════════════════════╝
 `);
 }
@@ -1156,6 +1459,32 @@ async function backgroundStartup() {
       print('💡 Set BRAIN_URL env var to enable 24/7 cloud learning sync.');
     }
   }, 5000);
+
+  // TTS startup check
+  setTimeout(() => {
+    if (ttsAvailable()) {
+      print('🔊 TTS ready — /tts on to enable voice responses');
+      if (CONFIG.ttsEnabled) speak('Commander online. All systems ready.');
+    } else {
+      print('💡 TTS not set up. Run: pip install pyttsx3  then /tts check');
+    }
+  }, 4000);
+
+  // Push notifications check
+  setTimeout(() => {
+    if (CONFIG.ntfyTopic) {
+      print(`📱 Push notifications active — topic: ${CONFIG.ntfyTopic}`);
+      notify('Commander Online', `v${CONFIG.version} started. All systems ready.`, 'low');
+    } else {
+      print('💡 Push notifications: set NTFY_TOPIC env var + install ntfy app');
+    }
+  }, 4500);
+
+  // Wake word — start if enabled
+  setTimeout(() => {
+    if (CONFIG.wakeEnabled) startWakeWord();
+    else print('💡 Wake word available — /wake on (requires vosk + model download)');
+  }, 6000);
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────

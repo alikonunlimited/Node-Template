@@ -410,6 +410,234 @@ app.get('/branches', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── MOBILE WEB UI ───────────────────────────────────────────────────────────
+// No auth — public read-only dashboard; write ops still require x-bridge-key
+
+app.get('/ui', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>AIKON-OS</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0a0a0f;--card:#12121a;--border:#1e1e2e;--accent:#7c3aed;--accent2:#06b6d4;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--text:#e2e8f0;--muted:#64748b;--font:'system-ui',-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;padding:0 0 60px}
+header{background:linear-gradient(135deg,#1e0a4e,#0a1e3f);padding:16px 20px;position:sticky;top:0;z-index:10;border-bottom:1px solid var(--border)}
+header h1{font-size:1.1rem;font-weight:700;letter-spacing:.05em;color:#a78bfa}
+header span{font-size:.75rem;color:var(--muted);display:block;margin-top:2px}
+.tabs{display:flex;gap:4px;padding:12px 16px;overflow-x:auto;position:sticky;top:57px;z-index:9;background:var(--bg);border-bottom:1px solid var(--border)}
+.tab{background:var(--card);border:1px solid var(--border);color:var(--muted);padding:6px 14px;border-radius:20px;font-size:.8rem;white-space:nowrap;cursor:pointer;transition:.2s}
+.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.pane{display:none;padding:16px}
+.pane.active{display:block}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px}
+.card h3{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px}
+.stat{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);font-size:.85rem}
+.stat:last-child{border:none}
+.badge{font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:600}
+.ok{background:#14532d;color:var(--green)}
+.warn{background:#713f12;color:var(--yellow)}
+.err{background:#7f1d1d;color:var(--red)}
+.mem-item{padding:8px 0;border-bottom:1px solid var(--border);font-size:.8rem;line-height:1.5}
+.mem-item:last-child{border:none}
+.mem-item .branch{font-size:.7rem;color:var(--accent2);font-weight:600;margin-bottom:2px}
+.opp{background:linear-gradient(135deg,var(--card),#1a1230);border:1px solid #2d1f5e;border-radius:10px;padding:12px;margin-bottom:10px}
+.opp .score{font-size:1.4rem;font-weight:700;color:var(--accent);float:right}
+.opp .branch-tag{font-size:.7rem;background:#1e1e40;color:#a78bfa;padding:2px 8px;border-radius:8px;display:inline-block;margin-bottom:6px}
+.opp p{font-size:.82rem;color:var(--text);line-height:1.5;clear:both}
+.refresh-btn{position:fixed;bottom:20px;right:20px;background:var(--accent);color:#fff;border:none;border-radius:50%;width:52px;height:52px;font-size:1.3rem;cursor:pointer;box-shadow:0 4px 20px rgba(124,58,237,.4)}
+.loading{text-align:center;color:var(--muted);padding:40px;font-size:.9rem}
+.ts{font-size:.7rem;color:var(--muted);margin-top:4px}
+.branch-pill{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:4px;font-size:.8rem}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.dot.off{background:var(--muted)}
+#chat-out{background:#06060c;border:1px solid var(--border);border-radius:10px;padding:12px;min-height:120px;max-height:300px;overflow-y:auto;font-size:.82rem;line-height:1.6;margin-bottom:10px;white-space:pre-wrap}
+#chat-in{width:100%;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:.85rem;outline:none}
+#chat-in:focus{border-color:var(--accent)}
+.send-btn{width:100%;margin-top:8px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px;font-size:.9rem;font-weight:600;cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ AIKON-OS Commander</h1>
+  <span id="last-refresh">Loading...</span>
+</header>
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('status')">Status</div>
+  <div class="tab" onclick="switchTab('opportunities')">Opportunities</div>
+  <div class="tab" onclick="switchTab('memory')">Memory</div>
+  <div class="tab" onclick="switchTab('branches')">Branches</div>
+  <div class="tab" onclick="switchTab('ask')">Ask</div>
+</div>
+
+<div id="pane-status" class="pane active"><div class="loading">Loading...</div></div>
+<div id="pane-opportunities" class="pane"><div class="loading">Loading...</div></div>
+<div id="pane-memory" class="pane"><div class="loading">Loading...</div></div>
+<div id="pane-branches" class="pane"><div class="loading">Loading...</div></div>
+<div id="pane-ask" class="pane">
+  <div class="card">
+    <h3>Ask Brain</h3>
+    <div id="chat-out">Ask the Brain a question below — it will query memory and respond.</div>
+    <input id="chat-in" type="text" placeholder="What opportunities exist in roblox this week?" onkeydown="if(event.key==='Enter')sendAsk()">
+    <button class="send-btn" onclick="sendAsk()">Send ➤</button>
+  </div>
+</div>
+
+<button class="refresh-btn" onclick="loadAll()" title="Refresh">↻</button>
+
+<script>
+const BASE = '';
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => {
+    const names = ['status','opportunities','memory','branches','ask'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('pane-' + name).classList.add('active');
+}
+
+async function fetchJSON(path) {
+  const r = await fetch(BASE + path);
+  return r.json();
+}
+
+function badge(val, okTest, warnTest) {
+  if (okTest(val)) return \`<span class="badge ok">✅ \${val}</span>\`;
+  if (warnTest && warnTest(val)) return \`<span class="badge warn">⚠️ \${val}</span>\`;
+  return \`<span class="badge err">❌ \${val}</span>\`;
+}
+
+function ts(str) {
+  if (!str) return '';
+  try { return new Date(str).toLocaleTimeString(); } catch(e) { return str; }
+}
+
+async function loadStatus() {
+  const el = document.getElementById('pane-status');
+  try {
+    const d = await fetchJSON('/status');
+    el.innerHTML = \`
+<div class="card">
+  <h3>🧠 Brain</h3>
+  <div class="stat"><span>Version</span><span>v\${d.version}</span></div>
+  <div class="stat"><span>Uptime</span><span>\${Math.floor(d.uptime/60)} min</span></div>
+  <div class="stat"><span>Cycles</span><span>\${d.cycle_count}</span></div>
+  <div class="stat"><span>Total Memories</span><span>\${d.total_memories}</span></div>
+  <div class="stat"><span>Active Branches</span><span>\${d.branches_active}</span></div>
+  <div class="stat"><span>Last Cycle</span><span>\${ts(d.last_cycle)}</span></div>
+</div>
+<div class="card">
+  <h3>📊 Opportunities</h3>
+  <div class="stat"><span>Scored</span><span>\${d.opportunities_scored}</span></div>
+</div>
+    \`;
+  } catch(e) {
+    el.innerHTML = \`<div class="card"><p style="color:var(--red)">\${e.message}</p></div>\`;
+  }
+}
+
+async function loadOpportunities() {
+  const el = document.getElementById('pane-opportunities');
+  try {
+    const d = await fetchJSON('/opportunities');
+    if (!d.items?.length) { el.innerHTML = '<div class="loading">No opportunities yet.</div>'; return; }
+    el.innerHTML = d.items.map(o => \`
+<div class="opp">
+  <span class="score">\${(o.score||0).toFixed(1)}</span>
+  <span class="branch-tag">\${o.branch}</span>
+  <p>\${o.content?.substring(0,200) || ''}</p>
+  <div class="ts">\${ts(o.ts)}</div>
+</div>\`).join('');
+  } catch(e) {
+    el.innerHTML = \`<div class="card"><p style="color:var(--red)">\${e.message}</p></div>\`;
+  }
+}
+
+async function loadMemory() {
+  const el = document.getElementById('pane-memory');
+  try {
+    const d = await fetchJSON('/memory?limit=30');
+    if (!d.memories?.length) { el.innerHTML = '<div class="loading">No memories yet.</div>'; return; }
+    el.innerHTML = '<div class="card"><h3>Recent Memory</h3>' +
+      d.memories.map(m => \`<div class="mem-item">
+        <div class="branch">\${m.branch} · \${m.memory_type}</div>
+        \${(m.content||m.insight||'').substring(0,200)}
+        <div class="ts">\${ts(m.created_at)}</div>
+      </div>\`).join('') + '</div>';
+  } catch(e) {
+    el.innerHTML = \`<div class="card"><p style="color:var(--red)">\${e.message}</p></div>\`;
+  }
+}
+
+async function loadBranches() {
+  const el = document.getElementById('pane-branches');
+  try {
+    const d = await fetchJSON('/branches');
+    el.innerHTML = '<div class="card"><h3>Business Branches</h3>' +
+      (d.branches||[]).map(b => \`
+<div class="branch-pill">
+  <span class="dot \${b.active ? '' : 'off'}"></span>
+  <span>\${b.name}</span>
+  <span style="color:var(--muted);font-size:.7rem">\${b.slug}</span>
+</div>\`).join('') + '</div>';
+  } catch(e) {
+    el.innerHTML = \`<div class="card"><p style="color:var(--red)">\${e.message}</p></div>\`;
+  }
+}
+
+async function sendAsk() {
+  const inp = document.getElementById('chat-in');
+  const out = document.getElementById('chat-out');
+  const q = inp.value.trim();
+  if (!q) return;
+  inp.value = '';
+  out.textContent += \`\\nYou: \${q}\\n\`;
+  out.textContent += 'Brain: thinking...\\n';
+  out.scrollTop = out.scrollHeight;
+  try {
+    const r = await fetch('/ask', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
+    const d = await r.json();
+    const lines = out.textContent.split('\\n');
+    lines.pop(); lines.pop(); // remove "thinking..." and blank
+    out.textContent = lines.join('\\n') + '\\nBrain: ' + (d.answer||d.error||'No response') + '\\n';
+    out.scrollTop = out.scrollHeight;
+  } catch(e) {
+    out.textContent += 'Error: ' + e.message + '\\n';
+  }
+}
+
+async function loadAll() {
+  document.getElementById('last-refresh').textContent = 'Refreshed ' + new Date().toLocaleTimeString();
+  await Promise.all([loadStatus(), loadOpportunities(), loadMemory(), loadBranches()]);
+}
+
+loadAll();
+</script>
+</body>
+</html>`);
+});
+
+// /ask endpoint for mobile UI chat
+app.post('/ask', async (req, res) => {
+  const { q } = req.body || {};
+  if (!q) return res.json({ error: 'No question' });
+  try {
+    const { rows } = await query(
+      `SELECT branch, content, insight FROM brain_memory
+       WHERE content ILIKE $1 OR insight ILIKE $1
+       ORDER BY created_at DESC LIMIT 5`,
+      [`%${q.substring(0,50).replace(/%/g,'')}%`]
+    );
+    const context = rows.length
+      ? rows.map(r => `[${r.branch}] ${r.content || r.insight}`).join('\n')
+      : 'No specific memory found.';
+    res.json({ answer: `Based on brain memory:\n\n${context}\n\nAsk Commander directly for deeper analysis.` });
+  } catch(e) { res.json({ error: e.message }); }
+});
+
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 
