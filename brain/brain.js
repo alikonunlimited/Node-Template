@@ -8,7 +8,7 @@ const https   = require('https');
 const http    = require('http');
 const { Pool } = require('pg');
 
-const VERSION = '1.2';
+const VERSION = '1.3';
 
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -1709,10 +1709,22 @@ async function main() {
       }
 
       // Replace any old relay socket
-      if (commanderRelayWs) try { commanderRelayWs.close(); } catch(e) {}
+      if (commanderRelayWs) {
+        if (commanderRelayWs._keepAlive) clearInterval(commanderRelayWs._keepAlive);
+        try { commanderRelayWs.close(); } catch(e) {}
+      }
       commanderRelayWs = ws;
       commanderConnected = true;
       log('RELAY: Commander connected from Thomas ✓');
+
+      // Brain-side keep-alive: ping Commander every 8s to prevent Render proxy idle timeout
+      ws._keepAlive = setInterval(() => {
+        if (ws.readyState === 1) {
+          try { ws.ping(); } catch(e) {}
+        } else {
+          clearInterval(ws._keepAlive);
+        }
+      }, 8000);
 
       // Notify all HUD browsers
       hudWss.clients.forEach(browser => {
@@ -1735,6 +1747,7 @@ async function main() {
       });
 
       ws.on('close', () => {
+        if (ws._keepAlive) clearInterval(ws._keepAlive);
         commanderConnected = false;
         commanderRelayWs = null;
         log('RELAY: Commander disconnected');
