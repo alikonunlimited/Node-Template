@@ -1420,15 +1420,21 @@ async function backgroundStartup() {
     } catch(e) { print(`\n⚠️  Trader unreachable (${e.message})`); }
   }, 1500);
 
-  setTimeout(async () => {
+  // DeepSeek auto-detect with retry — Ollama needs time to initialize after reboot
+  async function autoDetectDeepseek(attempt = 1) {
     const dsReady = await checkDeepseek();
     if (dsReady) {
       CONFIG.deepseekReady = true;
       print('🤖 DeepSeek R1 ready — smart routing active');
+    } else if (attempt < 6) {
+      // Retry every 15s for up to 75s
+      setTimeout(() => autoDetectDeepseek(attempt + 1), 15000);
+      if (attempt === 1) print('⏳ DeepSeek not ready yet — will retry automatically...');
     } else {
       print('💡 DeepSeek not loaded. Run /setup deepseek to enable reasoning mode.');
     }
-  }, 2000);
+  }
+  setTimeout(() => autoDetectDeepseek(), 5000);
 
   setTimeout(() => {
     const total = Object.entries(chromaMemory.collections).reduce((a,[,v]) => a + v.length, 0);
