@@ -1523,6 +1523,19 @@ async function main() {
   backgroundStartup();
   startBridgeLoop();
   startLearner();
+
+  // Health server — lets Brain/phone ping to check if Thomas is online
+  const healthPort = process.env.COMMANDER_PORT || 3000;
+  http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, version: CONFIG.version, uptime: Math.floor(process.uptime()) }));
+    } else {
+      res.writeHead(404); res.end();
+    }
+  }).listen(healthPort, '0.0.0.0', () => {
+    log(`HEALTH: listening on port ${healthPort}`);
+  });
 }
 
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });

@@ -339,6 +339,66 @@ function auth(req, res, next) {
   next();
 }
 
+// ─── WAKE ON LAN ─────────────────────────────────────────────────────────────
+// Sends magic packet to Thomas via Tailscale network
+// MAC: 9C-7B-EF-3D-3D-46  |  Tailscale IP: 100.91.204.20
+
+const dgram = require('dgram');
+
+function sendMagicPacket(mac, ip, port = 9) {
+  return new Promise((resolve, reject) => {
+    // Build magic packet: 6x FF + 16x MAC
+    const macBytes = mac.replace(/[:\-]/g, '').match(/.{2}/g).map(h => parseInt(h, 16));
+    const buf = Buffer.alloc(102);
+    buf.fill(0xFF, 0, 6);
+    for (let i = 1; i <= 16; i++) {
+      macBytes.forEach((b, j) => buf.writeUInt8(b, 6 + (i - 1) * 6 + j));
+    }
+    const socket = dgram.createSocket('udp4');
+    socket.once('error', e => { socket.close(); reject(e); });
+    socket.bind(() => {
+      socket.setBroadcast(true);
+      socket.send(buf, 0, buf.length, port, ip, err => {
+        socket.close();
+        if (err) reject(err); else resolve();
+      });
+    });
+  });
+}
+
+const THOMAS_MAC = process.env.THOMAS_MAC || '9C-7B-EF-3D-3D-46';
+const THOMAS_IP  = process.env.THOMAS_IP  || '100.91.204.20';
+
+app.post('/wake', auth, async (req, res) => {
+  try {
+    await sendMagicPacket(THOMAS_MAC, THOMAS_IP);
+    log(`WAKE: magic packet sent to ${THOMAS_MAC} @ ${THOMAS_IP}`);
+    res.json({ ok: true, message: 'Magic packet sent to Thomas', mac: THOMAS_MAC, ip: THOMAS_IP });
+  } catch(e) {
+    log(`WAKE_ERR: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Check if Thomas (Commander) is reachable via Tailscale
+app.get('/ping-thomas', auth, async (req, res) => {
+  const commanderPort = process.env.THOMAS_COMMANDER_PORT || 3000;
+  try {
+    await new Promise((resolve, reject) => {
+      const req2 = http.request({
+        hostname: THOMAS_IP, port: commanderPort,
+        path: '/health', method: 'GET', timeout: 3000
+      }, r => { r.resume(); resolve(); });
+      req2.on('error', reject);
+      req2.on('timeout', () => { req2.destroy(); reject(new Error('timeout')); });
+      req2.end();
+    });
+    res.json({ online: true, ip: THOMAS_IP });
+  } catch(e) {
+    res.json({ online: false, ip: THOMAS_IP, reason: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'alive', version: VERSION, cycle: cycleCount, uptime: Math.floor(process.uptime()) });
 });
@@ -463,6 +523,10 @@ header span{font-size:.75rem;color:var(--muted);display:block;margin-top:2px}
 <header>
   <h1>⚡ AIKON-OS Commander</h1>
   <span id="last-refresh">Loading...</span>
+  <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+    <span id="thomas-status" style="font-size:.75rem;color:var(--muted)">● Checking Thomas...</span>
+    <button id="wake-btn" onclick="wakeThomas()" style="background:#1a0a3e;border:1px solid var(--accent);color:#a78bfa;padding:4px 12px;border-radius:12px;font-size:.75rem;cursor:pointer">⚡ Wake Thomas</button>
+  </div>
 </header>
 <div class="tabs">
   <div class="tab active" onclick="switchTab('status')">Status</div>
@@ -609,12 +673,59 @@ async function sendAsk() {
   }
 }
 
+async function checkThomas() {
+  const el = document.getElementById('thomas-status');
+  const btn = document.getElementById('wake-btn');
+  try {
+    const r = await fetch('/ping-thomas');
+    const d = await r.json();
+    if (d.online) {
+      el.style.color = 'var(--green)';
+      el.textContent = '● Thomas online';
+      btn.style.display = 'none';
+    } else {
+      el.style.color = 'var(--red)';
+      el.textContent = '● Thomas offline';
+      btn.style.display = 'inline-block';
+    }
+  } catch(e) {
+    el.style.color = 'var(--muted)';
+    el.textContent = '● Thomas unknown';
+  }
+}
+
+async function wakeThomas() {
+  const btn = document.getElementById('wake-btn');
+  const el  = document.getElementById('thomas-status');
+  btn.textContent = '⚡ Sending...';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/wake', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d = await r.json();
+    if (d.ok) {
+      el.style.color = 'var(--yellow)';
+      el.textContent = '● Magic packet sent — booting...';
+      btn.textContent = '⚡ Sent!';
+      // Re-check after 30s
+      setTimeout(() => { checkThomas(); btn.textContent = '⚡ Wake Thomas'; btn.disabled = false; }, 30000);
+    } else {
+      btn.textContent = '⚡ Wake Thomas';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = '⚡ Wake Thomas';
+    btn.disabled = false;
+  }
+}
+
 async function loadAll() {
   document.getElementById('last-refresh').textContent = 'Refreshed ' + new Date().toLocaleTimeString();
-  await Promise.all([loadStatus(), loadOpportunities(), loadMemory(), loadBranches()]);
+  await Promise.all([loadStatus(), loadOpportunities(), loadMemory(), loadBranches(), checkThomas()]);
 }
 
 loadAll();
+// Check Thomas status every 60s
+setInterval(checkThomas, 60000);
 </script>
 </body>
 </html>`);
