@@ -336,6 +336,16 @@ function startBrainRelay() {
       ws.send(hello);
       // Pipe all hudBroadcast calls through this socket too
       CONFIG._relayWs = ws;
+
+      // Keep-alive ping every 5s — Render free tier kills idle WS after ~10s
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === 1) {
+          try { ws.send(JSON.stringify({ t: 'ping', ts: Date.now() })); } catch(e) {}
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 5000);
+      ws._pingInterval = pingInterval;
     });
 
     ws.on('message', (data) => {
@@ -349,6 +359,7 @@ function startBrainRelay() {
     ws.on('close', () => {
       CONFIG.brainConnected = false;
       CONFIG._relayWs = null;
+      if (ws._pingInterval) clearInterval(ws._pingInterval);
       log('RELAY: disconnected from Brain — retry in 15s');
       setTimeout(connect, 15000);
     });

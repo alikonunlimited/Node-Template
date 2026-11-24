@@ -8,7 +8,7 @@ const https   = require('https');
 const http    = require('http');
 const { Pool } = require('pg');
 
-const VERSION = '1.1';
+const VERSION = '1.2';
 
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -1724,6 +1724,8 @@ async function main() {
         try {
           const msg = data.toString();
           const parsed = JSON.parse(msg);
+          // Ignore keep-alive pings — don't buffer or forward them
+          if (parsed.t === 'ping') return;
           bufferFeed(parsed);
           // Forward to all HUD browsers
           hudWss.clients.forEach(browser => {
