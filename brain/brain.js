@@ -1703,7 +1703,6 @@ async function main() {
     relayWss.on('headers', (headers) => {
       const idx = headers.findIndex(h => /^Sec-WebSocket-Extensions:/i.test(h));
       if (idx !== -1) headers.splice(idx, 1);
-      headers.push('Sec-WebSocket-Extensions: ');
     });
     relayWss.on('connection', (ws, req) => {
       // Auth check
@@ -1777,7 +1776,6 @@ async function main() {
     hudWss.on('headers', (headers) => {
       const idx = headers.findIndex(h => /^Sec-WebSocket-Extensions:/i.test(h));
       if (idx !== -1) headers.splice(idx, 1);
-      headers.push('Sec-WebSocket-Extensions: ');
     });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);

@@ -311,7 +311,7 @@ function startBrainRelay() {
     .replace(/^http:\/\//, 'ws://')
     .replace(/\/$/, '') + '/relay';
 
-  const headers = { 'Sec-WebSocket-Extensions': '' };
+  const headers = {};
   if (CONFIG.bridgeKey) headers['x-bridge-key'] = CONFIG.bridgeKey;
 
   function connect() {
