@@ -23,7 +23,7 @@ function hudBroadcast(type, payload) {
   for (const ws of hudClients) {
     try { if (ws.readyState === 1) ws.send(msg); } catch(e) { hudClients.delete(ws); }
   }
-  // Brain relay (outbound socket to Render)
+  // Brain relay (outbound socket to Railway)
   if (CONFIG._relayWs && CONFIG._relayWs.readyState === 1) {
     try { CONFIG._relayWs.send(msg); } catch(e) {}
   }
