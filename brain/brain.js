@@ -1698,7 +1698,7 @@ async function main() {
     let commanderConnected = false;
 
     // /relay — Commander connects here on startup
-    const relayWss = new WebSocketServer({ server, path: '/relay' });
+    const relayWss = new WebSocketServer({ server, path: '/relay', perMessageDeflate: false });
     relayWss.on('connection', (ws, req) => {
       // Auth check
       const key = req.headers['x-bridge-key'] || new URL('http://x' + req.url).searchParams.get('key');
@@ -1766,7 +1766,7 @@ async function main() {
     });
 
     // /ws — HUD browsers connect here
-    const hudWss = new WebSocketServer({ server, path: '/ws' });
+    const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: false });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
 
@@ -1805,3 +1805,9 @@ async function main() {
 }
 
 main().catch(e => { log(`FATAL: ${e.message}`); process.exit(1); });
+
+// Graceful shutdown — Railway sends SIGTERM before killing container
+process.on('SIGTERM', () => {
+  log('BRAIN: SIGTERM received — shutting down gracefully');
+  process.exit(0);
+});
