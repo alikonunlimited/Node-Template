@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.0 — Learning Edition
+// AIKON-OS Commander v3.4 — Reverse Brain Relay
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -15,13 +15,17 @@ const { execSync, spawn } = require('child_process');
 let WebSocketServer = null;
 try { WebSocketServer = require('ws').Server; } catch(e) { /* ws not installed — HUD disabled */ }
 
-// Live HUD broadcast — all connected WebSocket clients
+// Live HUD broadcast — all connected WebSocket clients + Brain relay
 const hudClients = new Set();
 function hudBroadcast(type, payload) {
-  if (!hudClients.size) return;
   const msg = JSON.stringify({ t: type, ts: Date.now(), ...payload });
+  // Local WS clients (direct connections)
   for (const ws of hudClients) {
     try { if (ws.readyState === 1) ws.send(msg); } catch(e) { hudClients.delete(ws); }
+  }
+  // Brain relay (outbound socket to Render)
+  if (CONFIG._relayWs && CONFIG._relayWs.readyState === 1) {
+    try { CONFIG._relayWs.send(msg); } catch(e) {}
   }
 }
 
@@ -45,7 +49,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.3',
+  version:       '3.4',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -284,6 +288,78 @@ function startBridgeLoop() {
   }, CONFIG.pollInterval);
 
   setTimeout(bridgeHeartbeat, 2000);
+}
+
+// ─── BRAIN RELAY (v3.4) ──────────────────────────────────────────────────────
+// Thomas dials OUT to Brain /relay — no inbound firewall rules needed.
+// Brain receives this socket and forwards it to HUD browsers.
+let WebSocketClient = null;
+try { WebSocketClient = require('ws'); } catch(e) { /* ws not installed */ }
+
+function startBrainRelay() {
+  if (!CONFIG.brainUrl) {
+    log('RELAY: BRAIN_URL not set — skipping outbound relay');
+    return;
+  }
+  if (!WebSocketClient) {
+    log('RELAY: ws package not installed — skipping outbound relay');
+    return;
+  }
+
+  const wsUrl = CONFIG.brainUrl
+    .replace(/^https:\/\//, 'wss://')
+    .replace(/^http:\/\//, 'ws://')
+    .replace(/\/$/, '') + '/relay';
+
+  const headers = {};
+  if (CONFIG.bridgeKey) headers['x-bridge-key'] = CONFIG.bridgeKey;
+
+  function connect() {
+    log(`RELAY: connecting to Brain at ${wsUrl}`);
+    let ws;
+    try {
+      ws = new WebSocketClient(wsUrl, { headers, handshakeTimeout: 10000 });
+    } catch(e) {
+      log(`RELAY: connect error — ${e.message} — retry in 30s`);
+      setTimeout(connect, 30000);
+      return;
+    }
+
+    ws.on('open', () => {
+      CONFIG.brainConnected = true;
+      log('RELAY: connected to Brain ✓ — HUD will show LIVE');
+      // Send initial hello with stats
+      const hello = JSON.stringify({
+        t: 'hello', version: CONFIG.version,
+        uptime: Math.floor(process.uptime()), ts: Date.now()
+      });
+      ws.send(hello);
+      // Pipe all hudBroadcast calls through this socket too
+      CONFIG._relayWs = ws;
+    });
+
+    ws.on('message', (data) => {
+      // Commands sent from HUD browser via Brain
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.command) handleCommand(msg.command, null).catch(() => {});
+      } catch(e) {}
+    });
+
+    ws.on('close', () => {
+      CONFIG.brainConnected = false;
+      CONFIG._relayWs = null;
+      log('RELAY: disconnected from Brain — retry in 15s');
+      setTimeout(connect, 15000);
+    });
+
+    ws.on('error', (e) => {
+      log(`RELAY: error — ${e.message}`);
+    });
+  }
+
+  // Start after a short delay so health server is up first
+  setTimeout(connect, 3000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1762,6 +1838,7 @@ async function main() {
 
   backgroundStartup();
   startBridgeLoop();
+  startBrainRelay();
   startLearner();
 
   // Health + HUD WebSocket server + Phone relay
