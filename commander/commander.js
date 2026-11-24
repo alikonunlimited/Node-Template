@@ -337,10 +337,10 @@ function startBrainRelay() {
       // Pipe all hudBroadcast calls through this socket too
       CONFIG._relayWs = ws;
 
-      // Keep-alive ping every 5s — Render free tier kills idle WS after ~10s
+      // Keep-alive ping every 5s — use WS protocol ping (not JSON) so Render proxy doesn't interfere
       const pingInterval = setInterval(() => {
         if (ws.readyState === 1) {
-          try { ws.send(JSON.stringify({ t: 'ping', ts: Date.now() })); } catch(e) {}
+          try { ws.ping(); } catch(e) {}
         } else {
           clearInterval(pingInterval);
         }
