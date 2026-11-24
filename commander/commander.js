@@ -943,6 +943,212 @@ async function voiceInput(seconds = 5) {
   }
 }
 
+// ─── /READ — UNIVERSAL FILE READER ───────────────────────────────────────────
+async function cmdRead(filePath) {
+  const path = require('path');
+  const fs   = require('fs');
+  const ext  = path.extname(filePath).toLowerCase();
+
+  if (!fs.existsSync(filePath)) {
+    print(`❌ File not found: ${filePath}`);
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  print(`📂 Reading: ${filePath}  (${(stat.size/1024).toFixed(1)} KB)`);
+
+  // ── Plain text formats ──────────────────────────────────────────────────────
+  const textExts = ['.txt','.md','.markdown','.log','.env','.yaml','.yml',
+                    '.toml','.ini','.cfg','.conf','.sh','.bat','.ps1'];
+  if (textExts.includes(ext)) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines   = content.split('\n');
+    print(`─── ${lines.length} lines ───`);
+    lines.slice(0, 200).forEach((l, i) => print(`  ${String(i+1).padStart(4,' ')} │ ${l}`));
+    if (lines.length > 200) print(`  ... (${lines.length - 200} more lines — file truncated at 200)`);
+    return;
+  }
+
+  // ── Code / data formats ─────────────────────────────────────────────────────
+  const codeExts = ['.js','.ts','.jsx','.tsx','.py','.rb','.go','.java',
+                    '.c','.cpp','.h','.cs','.rs','.php','.html','.css','.sql'];
+  if (codeExts.includes(ext)) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines   = content.split('\n');
+    print(`─── ${lines.length} lines (${ext}) ───`);
+    lines.slice(0, 200).forEach((l, i) => print(`  ${String(i+1).padStart(4,' ')} │ ${l}`));
+    if (lines.length > 200) print(`  ... (${lines.length - 200} more lines)`);
+    return;
+  }
+
+  // ── JSON ────────────────────────────────────────────────────────────────────
+  if (ext === '.json' || ext === '.jsonl') {
+    try {
+      const raw  = fs.readFileSync(filePath, 'utf8');
+      if (ext === '.jsonl') {
+        const lines = raw.trim().split('\n');
+        print(`─── JSONL: ${lines.length} records ───`);
+        lines.slice(0, 20).forEach((l, i) => {
+          try { print(`  [${i}] ${JSON.stringify(JSON.parse(l), null, 0).substring(0, 200)}`); }
+          catch { print(`  [${i}] (invalid json) ${l.substring(0,100)}`); }
+        });
+        if (lines.length > 20) print(`  ... (${lines.length - 20} more records)`);
+      } else {
+        const obj = JSON.parse(raw);
+        const pretty = JSON.stringify(obj, null, 2);
+        const lines  = pretty.split('\n');
+        print(`─── JSON: ${lines.length} lines ───`);
+        lines.slice(0, 100).forEach(l => print(`  ${l}`));
+        if (lines.length > 100) print(`  ... (${lines.length - 100} more lines)`);
+      }
+    } catch(e) {
+      print(`❌ JSON parse error: ${e.message}`);
+    }
+    return;
+  }
+
+  // ── CSV ─────────────────────────────────────────────────────────────────────
+  if (ext === '.csv' || ext === '.tsv') {
+    const raw   = fs.readFileSync(filePath, 'utf8');
+    const sep   = ext === '.tsv' ? '\t' : ',';
+    const lines = raw.trim().split('\n');
+    const cols  = lines[0].split(sep);
+    print(`─── ${ext.toUpperCase()}: ${lines.length - 1} rows × ${cols.length} cols ───`);
+    print(`  COLS: ${cols.join(' | ')}`);
+    lines.slice(1, 11).forEach((l, i) => print(`  [${i+1}] ${l.substring(0,200)}`));
+    if (lines.length > 11) print(`  ... (${lines.length - 11} more rows)`);
+    return;
+  }
+
+  // ── PDF ─────────────────────────────────────────────────────────────────────
+  if (ext === '.pdf') {
+    const { execSync } = require('child_process');
+    try {
+      // Try pdftotext (poppler-utils)
+      const text = execSync(`pdftotext "${filePath}" -`, { encoding:'utf8', timeout:15000 });
+      const lines = text.split('\n').filter(l => l.trim());
+      print(`─── PDF TEXT: ${lines.length} lines ───`);
+      lines.slice(0, 100).forEach(l => print(`  ${l}`));
+      if (lines.length > 100) print(`  ... (${lines.length - 100} more lines)`);
+    } catch(e) {
+      print(`⚠️  pdftotext not available. Install: choco install poppler`);
+      print(`   File size: ${(stat.size/1024).toFixed(1)} KB — binary PDF`);
+    }
+    return;
+  }
+
+  // ── DOCX ────────────────────────────────────────────────────────────────────
+  if (ext === '.docx' || ext === '.doc') {
+    try {
+      const mammoth = require('mammoth');
+      const result  = await mammoth.extractRawText({ path: filePath });
+      const lines   = result.value.split('\n').filter(l => l.trim());
+      print(`─── DOCX TEXT: ${lines.length} lines ───`);
+      lines.slice(0, 100).forEach(l => print(`  ${l}`));
+      if (lines.length > 100) print(`  ... (${lines.length - 100} more lines)`);
+    } catch(e) {
+      if (e.code === 'MODULE_NOT_FOUND') {
+        print(`⚠️  mammoth not installed. Run: npm install mammoth`);
+      } else {
+        print(`❌ DOCX error: ${e.message}`);
+      }
+    }
+    return;
+  }
+
+  // ── XLSX ────────────────────────────────────────────────────────────────────
+  if (ext === '.xlsx' || ext === '.xls' || ext === '.ods') {
+    try {
+      const xlsx    = require('node-xlsx');
+      const sheets  = xlsx.parse(filePath);
+      print(`─── XLSX: ${sheets.length} sheet(s) ───`);
+      sheets.forEach((sheet, si) => {
+        print(`  ── Sheet ${si+1}: "${sheet.name}" (${sheet.data.length} rows) ──`);
+        sheet.data.slice(0, 20).forEach((row, ri) => {
+          print(`    [${ri}] ${row.map(c => String(c ?? '').substring(0,20)).join(' | ')}`);
+        });
+        if (sheet.data.length > 20) print(`    ... (${sheet.data.length - 20} more rows)`);
+      });
+    } catch(e) {
+      if (e.code === 'MODULE_NOT_FOUND') {
+        print(`⚠️  node-xlsx not installed. Run: npm install node-xlsx`);
+      } else {
+        print(`❌ XLSX error: ${e.message}`);
+      }
+    }
+    return;
+  }
+
+  // ── ZIP / archive ───────────────────────────────────────────────────────────
+  if (ext === '.zip' || ext === '.tar' || ext === '.gz' || ext === '.7z') {
+    const { execSync } = require('child_process');
+    try {
+      let list;
+      if (ext === '.zip') {
+        list = execSync(`unzip -l "${filePath}"`, { encoding:'utf8', timeout:10000 });
+      } else {
+        list = execSync(`tar -tvf "${filePath}" 2>&1 || 7z l "${filePath}" 2>&1`, { encoding:'utf8', timeout:10000 });
+      }
+      const lines = list.split('\n').slice(0, 50);
+      print(`─── ARCHIVE CONTENTS ───`);
+      lines.forEach(l => print(`  ${l}`));
+    } catch(e) {
+      print(`⚠️  Archive listing failed: ${e.message}`);
+      print(`   Install unzip / tar to list contents.`);
+    }
+    return;
+  }
+
+  // ── Images ──────────────────────────────────────────────────────────────────
+  const imgExts = ['.jpg','.jpeg','.png','.gif','.bmp','.webp','.tiff','.svg'];
+  if (imgExts.includes(ext)) {
+    const { execSync } = require('child_process');
+    print(`─── IMAGE FILE ───`);
+    print(`  Format : ${ext.toUpperCase().slice(1)}`);
+    print(`  Size   : ${(stat.size/1024).toFixed(1)} KB`);
+    if (ext === '.svg') {
+      const content = fs.readFileSync(filePath, 'utf8');
+      print(`  SVG lines: ${content.split('\n').length}`);
+      print(`  Preview  : ${content.substring(0,300)}`);
+    } else {
+      try {
+        const info = execSync(`identify "${filePath}" 2>&1`, { encoding:'utf8', timeout:5000 });
+        print(`  Info   : ${info.trim()}`);
+      } catch {
+        print(`  (Install ImageMagick for dimension info: choco install imagemagick)`);
+      }
+    }
+    return;
+  }
+
+  // ── Audio / Video ───────────────────────────────────────────────────────────
+  const mediaExts = ['.mp3','.wav','.flac','.ogg','.aac','.mp4','.mov','.mkv','.avi','.webm','.m4a'];
+  if (mediaExts.includes(ext)) {
+    const { execSync } = require('child_process');
+    print(`─── MEDIA FILE ───`);
+    print(`  Format : ${ext.toUpperCase().slice(1)}`);
+    print(`  Size   : ${(stat.size / (1024*1024)).toFixed(2)} MB`);
+    try {
+      const info = execSync(`ffprobe -v quiet -print_format json -show_format -show_streams "${filePath}" 2>&1`, { encoding:'utf8', timeout:10000 });
+      const d    = JSON.parse(info);
+      const fmt  = d.format || {};
+      print(`  Duration : ${parseFloat(fmt.duration||0).toFixed(1)}s`);
+      print(`  Bit rate : ${Math.round((fmt.bit_rate||0)/1000)} kbps`);
+      (d.streams||[]).forEach((s, i) => print(`  Stream ${i}: ${s.codec_type} ${s.codec_name} ${s.width?s.width+'x'+s.height:''}`));
+    } catch {
+      print(`  (Install ffmpeg for media metadata: choco install ffmpeg)`);
+    }
+    return;
+  }
+
+  // ── Fallback: hex preview ───────────────────────────────────────────────────
+  const buf = fs.readFileSync(filePath);
+  const hex = [...buf.slice(0,64)].map(b=>b.toString(16).padStart(2,'0')).join(' ');
+  print(`─── BINARY FILE (${ext || 'unknown'}) ───`);
+  print(`  Size    : ${(stat.size/1024).toFixed(1)} KB`);
+  print(`  Hex(64B): ${hex}`);
+  print(`  (No reader available for ${ext || 'this type'})`);
+}
+
 // ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 async function handleCommand(input, rl) {
   const parts = input.trim().split(/\s+/);
@@ -1350,6 +1556,12 @@ async function handleCommand(input, rl) {
     case '/notes': { const n = memory.filter(m => m.role === 'note'); n.length ? n.slice(-20).forEach(x => print(`  [${x.ts.split('T')[0]}] ${x.content}`)) : print('No notes.'); break; }
     case '/clear': { console.clear(); printBanner(); break; }
 
+    case '/read': {
+      if (!args) { print('Usage: /read <filepath>'); break; }
+      await cmdRead(args.trim());
+      break;
+    }
+
     case '/help': {
       print(`
 COMMANDER v${CONFIG.version} COMMANDS:
@@ -1379,6 +1591,7 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /branch add|list     — 🌿 Manage business branches
   /status              — 🖥️  Full system status
   /shell <cmd>         — ⚙️  Run shell command
+  /read <file>         — 📂 Read any file (txt/md/json/js/py/csv/pdf/docx/xlsx/img/zip)
   /note <text>         — 📝 Save a note
   /notes               — Show notes
   /clear               — Clear screen

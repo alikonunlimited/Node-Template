@@ -857,133 +857,256 @@ const JARVIS_HUD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JARVIS HUD — AIKON-OS</title>
+<title>AIKON-OS — JARVIS HUD</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#020208;--panel:#07071a;--border:#1a1a4e;
-  --cyan:#00f5ff;--purple:#b366ff;--green:#00ff88;--red:#ff3366;--yellow:#ffe600;
-  --dim:#334;--glow-cyan:0 0 20px #00f5ff66;--glow-purple:0 0 20px #b366ff55;
+  --bg:#000005;--panel:rgba(10,8,25,.82);--border:rgba(255,165,0,.18);
+  --gold:#ffaa00;--gold2:#ff8800;--gold3:#ffdd88;
+  --amber:#ff6600;--core:#fff8e0;
+  --cyan:#00f5ff;--green:#00ff88;--red:#ff3366;--dim:#554422;
   --font-hud:'Orbitron',monospace;--font-mono:'Share Tech Mono',monospace;
+  --glow-gold:0 0 30px #ffaa0066,0 0 60px #ff880033;
 }
-html,body{width:100%;height:100%;background:var(--bg);color:var(--cyan);font-family:var(--font-hud);overflow:hidden}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--gold);font-family:var(--font-hud);overflow:hidden}
 body{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:1fr;height:100vh}
+
+/* ── STARS ── */
+#stars{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.star{position:absolute;border-radius:50%;background:#fff;animation:twinkle var(--d,3s) ease-in-out infinite}
+@keyframes twinkle{0%,100%{opacity:.1}50%{opacity:var(--op,.7)}}
 
 /* ── TOP BAR ── */
 #topbar{
+  position:relative;z-index:10;
   display:flex;align-items:center;justify-content:space-between;
-  padding:10px 24px;background:rgba(0,245,255,.03);
-  border-bottom:1px solid var(--border);
-  backdrop-filter:blur(4px);position:relative;z-index:10;
+  padding:10px 28px;
+  background:linear-gradient(180deg,rgba(255,140,0,.06) 0%,transparent 100%);
+  border-bottom:1px solid rgba(255,140,0,.2);
 }
-#topbar .logo{font-size:1.1rem;font-weight:900;letter-spacing:.2em;color:var(--cyan);text-shadow:var(--glow-cyan)}
-#topbar .subtitle{font-size:.6rem;color:var(--purple);letter-spacing:.15em;margin-top:2px}
-#topbar .clock{font-size:1.3rem;font-weight:700;color:var(--yellow);font-family:var(--font-mono);letter-spacing:.1em}
-#topbar .date{font-size:.6rem;color:var(--dim);letter-spacing:.1em;text-align:right;margin-top:2px}
-#conn-status{font-size:.65rem;letter-spacing:.1em;padding:3px 10px;border-radius:12px;border:1px solid;transition:.3s}
-#conn-status.connected{color:var(--green);border-color:var(--green);box-shadow:0 0 10px #00ff8844}
+.logo{font-size:1rem;font-weight:900;letter-spacing:.22em;color:var(--gold);text-shadow:var(--glow-gold)}
+.subtitle{font-size:.55rem;color:rgba(255,170,0,.5);letter-spacing:.18em;margin-top:2px}
+.clock{font-size:1.3rem;font-weight:700;color:var(--gold3);font-family:var(--font-mono);letter-spacing:.08em;text-align:center}
+.date-line{font-size:.55rem;color:rgba(255,140,0,.4);letter-spacing:.12em;text-align:center;margin-top:2px}
+#conn-status{font-size:.6rem;letter-spacing:.12em;padding:3px 12px;border-radius:14px;border:1px solid;transition:.4s;text-align:right}
+#conn-status.connected{color:var(--green);border-color:var(--green);box-shadow:0 0 10px #00ff8833;text-shadow:0 0 8px var(--green)}
 #conn-status.disconnected{color:var(--red);border-color:var(--red)}
-#conn-status.connecting{color:var(--yellow);border-color:var(--yellow)}
+#conn-status.connecting{color:var(--gold);border-color:var(--gold);animation:connPulse 1.5s ease-in-out infinite}
+@keyframes connPulse{0%,100%{opacity:.6}50%{opacity:1}}
 
-/* ── MAIN GRID ── */
-#main{display:grid;grid-template-columns:280px 1fr 280px;gap:12px;padding:12px 16px;overflow:hidden;height:100%}
-.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;position:relative;overflow:hidden;display:flex;flex-direction:column;gap:8px}
-.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.6}
-.panel.purple::before{background:linear-gradient(90deg,transparent,var(--purple),transparent)}
+/* ── MAIN LAYOUT ── */
+#main{
+  position:relative;z-index:5;
+  display:grid;grid-template-columns:260px 1fr 260px;
+  gap:10px;padding:10px 14px;overflow:hidden;height:100%
+}
+
+/* ── PANELS ── */
+.panel{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:6px;padding:12px;
+  position:relative;overflow:hidden;
+  display:flex;flex-direction:column;gap:7px;
+  backdrop-filter:blur(6px);
+}
+.panel::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.7;
+}
+.panel.amber::before{background:linear-gradient(90deg,transparent,var(--amber),transparent)}
 .panel.green::before{background:linear-gradient(90deg,transparent,var(--green),transparent)}
-.panel-title{font-size:.6rem;letter-spacing:.2em;color:var(--dim);text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:6px}
-.panel-title::after{content:'';flex:1;height:1px;background:var(--border)}
+.panel::after{
+  content:'';position:absolute;top:5px;right:5px;width:5px;height:5px;
+  border-top:1px solid var(--gold);border-right:1px solid var(--gold);opacity:.5;pointer-events:none
+}
+.panel-title{
+  font-size:.55rem;letter-spacing:.22em;
+  color:rgba(255,165,0,.55);text-transform:uppercase;
+  margin-bottom:2px;display:flex;align-items:center;gap:6px
+}
+.panel-title::after{content:'';flex:1;height:1px;background:rgba(255,140,0,.15)}
 
-/* ── LEFT COLUMN ── */
-#panel-status .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a3a;font-size:.72rem}
-#panel-status .stat-row:last-child{border:none}
-#panel-status .stat-label{color:var(--dim)}
-#panel-status .stat-val{color:var(--cyan);font-family:var(--font-mono)}
-#panel-status .stat-val.ok{color:var(--green)}
-#panel-status .stat-val.off{color:var(--red)}
-#panel-status .stat-val.warn{color:var(--yellow)}
+/* ── STAT ROWS ── */
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,140,0,.08);font-size:.68rem}
+.stat-row:last-child{border:none}
+.stat-label{color:rgba(255,140,0,.4);letter-spacing:.05em}
+.stat-val{color:var(--gold3);font-family:var(--font-mono)}
+.stat-val.ok{color:var(--green);text-shadow:0 0 8px var(--green)}
+.stat-val.off{color:var(--red)}
 
-#panel-trader{flex:1}
-.trader-price{font-size:1.6rem;font-weight:700;color:var(--yellow);font-family:var(--font-mono);letter-spacing:.05em;text-shadow:0 0 20px #ffe60066;text-align:center;padding:8px 0}
-.trader-row{display:flex;justify-content:space-between;font-size:.7rem;padding:3px 0;border-bottom:1px solid #1a1a3a}
+/* ── TRADER ── */
+.trader-price{
+  font-size:1.5rem;font-weight:700;
+  color:var(--gold);font-family:var(--font-mono);
+  text-shadow:var(--glow-gold);text-align:center;padding:6px 0;
+  animation:priceGlow 2.5s ease-in-out infinite
+}
+@keyframes priceGlow{0%,100%{text-shadow:0 0 20px #ffaa0055}50%{text-shadow:0 0 40px #ffaa00aa,0 0 80px #ff880044}}
+.trader-row{display:flex;justify-content:space-between;font-size:.68rem;padding:3px 0;border-bottom:1px solid rgba(255,140,0,.08)}
 .trader-row:last-child{border:none}
-.trader-row span:first-child{color:var(--dim)}
-.trader-row span:last-child{font-family:var(--font-mono);color:var(--cyan)}
+.trader-row span:first-child{color:rgba(255,140,0,.4)}
+.trader-row span:last-child{font-family:var(--font-mono);color:var(--gold3)}
 
-/* ── CENTER COLUMN ── */
+/* ── ORB CENTER ── */
+#orb-wrap{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:0;padding:0;position:relative;overflow:visible
+}
+#orb-scene{
+  position:relative;width:260px;height:260px;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;
+}
+/* Core glow */
+#orb-core{
+  position:absolute;width:70px;height:70px;border-radius:50%;
+  background:radial-gradient(circle at 38% 36%,#fffde0 0%,#ffd060 30%,#ff9900 60%,#ff6600 85%,#aa3300 100%);
+  box-shadow:0 0 20px 8px #ffcc4499,0 0 50px 20px #ff880066,0 0 100px 40px #ff440033;
+  z-index:10;animation:coreBreath 3s ease-in-out infinite
+}
+@keyframes coreBreath{
+  0%,100%{transform:scale(1);box-shadow:0 0 20px 8px #ffcc4499,0 0 50px 20px #ff880066,0 0 100px 40px #ff440033}
+  50%{transform:scale(1.08);box-shadow:0 0 30px 12px #ffcc44cc,0 0 70px 30px #ff8800aa,0 0 140px 55px #ff440055}
+}
+/* Particle aura */
+#orb-aura{
+  position:absolute;width:100px;height:100px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,170,0,.12) 0%,transparent 70%);
+  animation:auraBreath 3s ease-in-out infinite;z-index:9
+}
+@keyframes auraBreath{0%,100%{transform:scale(1);opacity:.8}50%{transform:scale(1.3);opacity:1}}
+
+/* Orbital rings */
+.ring{
+  position:absolute;border-radius:50%;border:2px solid;
+  top:50%;left:50%;transform-origin:center center;
+}
+.ring-1{
+  width:150px;height:150px;margin:-75px 0 0 -75px;
+  border-color:rgba(255,165,0,.55);box-shadow:0 0 10px rgba(255,140,0,.3);
+  animation:orbit1 5s linear infinite
+}
+.ring-2{
+  width:190px;height:190px;margin:-95px 0 0 -95px;
+  border-color:rgba(255,120,0,.4);box-shadow:0 0 8px rgba(255,100,0,.2);
+  animation:orbit2 8s linear infinite
+}
+.ring-3{
+  width:230px;height:230px;margin:-115px 0 0 -115px;
+  border-color:rgba(255,80,0,.3);box-shadow:0 0 6px rgba(255,60,0,.15);
+  animation:orbit3 12s linear infinite
+}
+@keyframes orbit1{from{transform:rotateX(72deg) rotateZ(0deg)}to{transform:rotateX(72deg) rotateZ(360deg)}}
+@keyframes orbit2{from{transform:rotateX(20deg) rotateY(45deg) rotateZ(0deg)}to{transform:rotateX(20deg) rotateY(45deg) rotateZ(360deg)}}
+@keyframes orbit3{from{transform:rotateX(55deg) rotateY(-30deg) rotateZ(0deg)}to{transform:rotateX(55deg) rotateY(-30deg) rotateZ(360deg)}}
+
+/* Orbital dots */
+.dot{position:absolute;width:6px;height:6px;border-radius:50%;margin:-3px 0 0 -3px;top:50%;left:50%}
+.dot-1{background:#ffdd00;box-shadow:0 0 10px #ffdd00;animation:dotOrbit1 5s linear infinite}
+.dot-2{background:#ff8800;box-shadow:0 0 8px #ff8800;animation:dotOrbit2 8s linear infinite}
+.dot-3{background:#ff4400;box-shadow:0 0 6px #ff4400;animation:dotOrbit3 12s linear infinite}
+@keyframes dotOrbit1{from{transform:rotateX(72deg) rotateZ(0deg) translateX(75px) rotateX(-72deg) rotateZ(0deg)}to{transform:rotateX(72deg) rotateZ(360deg) translateX(75px) rotateX(-72deg) rotateZ(-360deg)}}
+@keyframes dotOrbit2{from{transform:rotateX(20deg) rotateY(45deg) rotateZ(0deg) translateX(95px) rotateY(-45deg) rotateX(-20deg)}to{transform:rotateX(20deg) rotateY(45deg) rotateZ(360deg) translateX(95px) rotateY(-45deg) rotateX(-20deg)}}
+@keyframes dotOrbit3{from{transform:rotateX(55deg) rotateY(-30deg) rotateZ(0deg) translateX(115px) rotateY(30deg) rotateX(-55deg)}to{transform:rotateX(55deg) rotateY(-30deg) rotateZ(360deg) translateX(115px) rotateY(30deg) rotateX(-55deg)}}
+
+/* Orb label area */
+#orb-label{text-align:center;margin-top:2px}
+.orb-title{font-size:.7rem;font-weight:900;letter-spacing:.3em;color:var(--gold);text-shadow:var(--glow-gold)}
+.orb-sub{font-size:.5rem;letter-spacing:.2em;color:rgba(255,140,0,.5);margin-top:2px}
+
+/* Mini stat strip below orb */
+#orb-stats{
+  display:flex;gap:16px;justify-content:center;margin-top:4px;
+  font-family:var(--font-mono);font-size:.6rem
+}
+.os-item{text-align:center}
+.os-val{color:var(--gold3);font-size:.75rem;display:block}
+.os-key{color:rgba(255,140,0,.4);font-size:.5rem;letter-spacing:.1em}
+
+/* Feed beneath orb */
 #panel-feed{flex:1;min-height:0}
-#feed-log{flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.75rem;line-height:1.6;min-height:0;max-height:100%;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
-#feed-log::-webkit-scrollbar{width:4px}
-#feed-log::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.feed-line{padding:2px 0;border-bottom:1px solid #0a0a20;animation:fadeIn .3s ease}
-.feed-line.cmd{color:var(--purple)}
-.feed-line.log{color:var(--cyan)}
+#feed-log{
+  flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.7rem;
+  line-height:1.55;min-height:0;max-height:100%;
+  scrollbar-width:thin;scrollbar-color:rgba(255,140,0,.2) transparent
+}
+#feed-log::-webkit-scrollbar{width:3px}
+#feed-log::-webkit-scrollbar-thumb{background:rgba(255,140,0,.2);border-radius:2px}
+.feed-line{padding:2px 0;border-bottom:1px solid rgba(255,140,0,.05);animation:fadeIn .3s ease}
+.feed-line.cmd{color:var(--gold)}
+.feed-line.log{color:rgba(255,220,120,.8)}
 .feed-line.err{color:var(--red)}
-.feed-line.sys{color:var(--dim)}
-.feed-line .feed-ts{color:#334;margin-right:8px;font-size:.65rem}
-@keyframes fadeIn{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+.feed-line.sys{color:rgba(255,140,0,.35)}
+.feed-line .feed-ts{color:rgba(255,140,0,.25);margin-right:8px;font-size:.6rem}
+@keyframes fadeIn{from{opacity:0;transform:translateX(-5px)}to{opacity:1;transform:none}}
 
-#panel-opp{max-height:180px}
-.opp-item{font-size:.7rem;padding:5px 0;border-bottom:1px solid #1a1a3a;line-height:1.4}
+/* Opp panel */
+#panel-opp{max-height:170px}
+.opp-item{font-size:.67rem;padding:4px 0;border-bottom:1px solid rgba(255,140,0,.08);line-height:1.4}
 .opp-item:last-child{border:none}
-.opp-item .opp-score{color:var(--yellow);font-weight:700;float:right;font-family:var(--font-mono)}
-.opp-item .opp-branch{font-size:.6rem;color:var(--purple);margin-bottom:2px}
-.opp-item .opp-text{color:var(--cyan)}
+.opp-score{color:var(--gold);font-weight:700;float:right;font-family:var(--font-mono)}
+.opp-branch{font-size:.55rem;color:rgba(255,100,0,.7);margin-bottom:2px;letter-spacing:.08em}
+.opp-text{color:rgba(255,220,160,.7)}
 
-/* ── RIGHT COLUMN ── */
-#panel-teams{}
-.team-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1a1a3a;font-size:.72rem}
+/* Teams */
+.team-item{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,140,0,.08);font-size:.68rem}
 .team-item:last-child{border:none}
-.team-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
+.team-dot{width:7px;height:7px;border-radius:50%;background:rgba(255,140,0,.2);flex-shrink:0}
 .team-dot.active{background:var(--green);box-shadow:0 0 8px var(--green)}
-.team-name{color:var(--cyan)}
-.team-model{font-size:.6rem;color:var(--dim);margin-left:auto;font-family:var(--font-mono)}
+.team-name{color:var(--gold3)}
+.team-model{font-size:.55rem;color:rgba(255,140,0,.35);margin-left:auto;font-family:var(--font-mono)}
 
+/* Memory */
 #panel-memory{flex:1;min-height:0}
-#memory-scroll{flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.68rem;line-height:1.5;min-height:0;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
-.mem-line{padding:2px 0;border-bottom:1px solid #0a0a20}
-.mem-line .mem-branch{color:var(--purple);font-size:.6rem}
-.mem-line .mem-text{color:#8899bb}
+#memory-scroll{flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.65rem;line-height:1.5;min-height:0;scrollbar-width:thin;scrollbar-color:rgba(255,140,0,.15) transparent}
+.mem-line{padding:2px 0;border-bottom:1px solid rgba(255,140,0,.06)}
+.mem-branch{color:rgba(255,100,0,.6);font-size:.55rem;letter-spacing:.08em}
+.mem-text{color:rgba(255,200,120,.55)}
 
 /* ── BOTTOM BAR ── */
-#bottombar{padding:8px 24px;background:rgba(0,245,255,.02);border-top:1px solid var(--border);display:flex;align-items:center;gap:16px;font-size:.6rem;letter-spacing:.1em;color:var(--dim)}
-#bottombar .sep{color:var(--border)}
+#bottombar{
+  position:relative;z-index:10;
+  padding:7px 24px;
+  background:linear-gradient(0deg,rgba(255,140,0,.04) 0%,transparent 100%);
+  border-top:1px solid rgba(255,140,0,.18);
+  display:flex;align-items:center;gap:14px;
+  font-size:.55rem;letter-spacing:.12em;color:rgba(255,140,0,.35)
+}
+.sep{color:rgba(255,140,0,.2)}
 .uptime-val{color:var(--green);font-family:var(--font-mono)}
-.version-val{color:var(--purple)}
+.version-val{color:rgba(255,140,0,.6)}
 
-/* ── SCAN LINE OVERLAY ── */
+/* ── SCANLINES ── */
 body::after{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:999;
-  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px);
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.025) 2px,rgba(0,0,0,.025) 4px);
 }
-
-/* ── CORNER DECORATIONS ── */
-.panel::after{
-  content:'';position:absolute;top:6px;right:6px;width:6px;height:6px;
-  border-top:1px solid var(--cyan);border-right:1px solid var(--cyan);opacity:.4;
+/* Vignette */
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:1;
+  background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.7) 100%);
 }
-.panel::before,.panel::after{pointer-events:none}
-
-/* ── PULSE ANIMATION ── */
-@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
-.pulsing{animation:pulse 2s ease-in-out infinite}
 </style>
 </head>
 <body>
 
+<!-- STARS -->
+<div id="stars"></div>
+
 <!-- TOP BAR -->
 <div id="topbar">
   <div>
-    <div class="logo">⚡ AIKON-OS COMMANDER</div>
+    <div class="logo">⬡ AIKON-OS COMMANDER</div>
     <div class="subtitle">JARVIS HUD v3.2 · REAL-TIME SYSTEM MONITOR</div>
   </div>
-  <div style="text-align:center">
-    <div id="conn-status" class="connecting">◉ CONNECTING</div>
+  <div>
+    <div class="clock" id="clock">--:--:--</div>
+    <div class="date-line" id="date">...</div>
   </div>
   <div style="text-align:right">
-    <div class="clock" id="clock">--:--:--</div>
-    <div class="date" id="date">...</div>
+    <div id="conn-status" class="connecting">◉ CONNECTING</div>
   </div>
 </div>
 
@@ -991,7 +1114,7 @@ body::after{
 <div id="main">
 
   <!-- LEFT: STATUS + TRADER -->
-  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden">
+  <div style="display:flex;flex-direction:column;gap:10px;overflow:hidden">
     <div class="panel" id="panel-status">
       <div class="panel-title">◈ SYSTEM STATUS</div>
       <div class="stat-row"><span class="stat-label">VERSION</span><span class="stat-val" id="sv-version">--</span></div>
@@ -1002,9 +1125,9 @@ body::after{
       <div class="stat-row"><span class="stat-label">BRAIN LINK</span><span class="stat-val" id="sv-brain">--</span></div>
       <div class="stat-row"><span class="stat-label">HUD CLIENTS</span><span class="stat-val" id="sv-clients">--</span></div>
     </div>
-    <div class="panel purple" id="panel-trader" style="flex:1">
+    <div class="panel amber" id="panel-trader" style="flex:1">
       <div class="panel-title">◈ XAU/USD TRADER</div>
-      <div class="trader-price pulsing" id="t-price">$-.--</div>
+      <div class="trader-price" id="t-price">$-.--</div>
       <div class="trader-row"><span>STATUS</span><span id="t-status">--</span></div>
       <div class="trader-row"><span>BALANCE</span><span id="t-balance">--</span></div>
       <div class="trader-row"><span>WIN RATE</span><span id="t-winrate">--</span></div>
@@ -1014,21 +1137,46 @@ body::after{
     </div>
   </div>
 
-  <!-- CENTER: LIVE FEED + OPPORTUNITIES -->
-  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
+  <!-- CENTER: ORB + FEED + OPPORTUNITIES -->
+  <div style="display:flex;flex-direction:column;gap:10px;overflow:hidden;min-height:0">
+    <!-- ORB PANEL -->
+    <div class="panel" id="orb-wrap" style="align-items:center;padding-top:16px;padding-bottom:12px">
+      <div id="orb-scene">
+        <div id="orb-aura"></div>
+        <div id="orb-core"></div>
+        <div class="ring ring-1"></div>
+        <div class="ring ring-2"></div>
+        <div class="ring ring-3"></div>
+        <div class="dot dot-1"></div>
+        <div class="dot dot-2"></div>
+        <div class="dot dot-3"></div>
+      </div>
+      <div id="orb-label">
+        <div class="orb-title">AIKON-OS</div>
+        <div class="orb-sub">COMMANDER ACTIVE</div>
+      </div>
+      <div id="orb-stats">
+        <div class="os-item"><span class="os-val" id="os-uptime">--</span><span class="os-key">UPTIME</span></div>
+        <div class="os-item"><span class="os-val" id="os-cycles">--</span><span class="os-key">CYCLES</span></div>
+        <div class="os-item"><span class="os-val" id="os-memories">--</span><span class="os-key">MEMORIES</span></div>
+        <div class="os-item"><span class="os-val" id="os-version">--</span><span class="os-key">BUILD</span></div>
+      </div>
+    </div>
+    <!-- LIVE FEED -->
     <div class="panel" id="panel-feed" style="flex:1;min-height:0">
       <div class="panel-title">◈ LIVE COMMANDER FEED</div>
       <div id="feed-log"></div>
     </div>
+    <!-- OPPORTUNITIES -->
     <div class="panel green" id="panel-opp">
       <div class="panel-title">◈ TOP OPPORTUNITIES</div>
-      <div id="opp-list"><div style="color:var(--dim);font-size:.7rem">Loading...</div></div>
+      <div id="opp-list"><div style="color:rgba(255,140,0,.35);font-size:.67rem">Loading...</div></div>
     </div>
   </div>
 
   <!-- RIGHT: TEAMS + MEMORY -->
-  <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden">
-    <div class="panel purple" id="panel-teams">
+  <div style="display:flex;flex-direction:column;gap:10px;overflow:hidden">
+    <div class="panel amber" id="panel-teams">
       <div class="panel-title">◈ ACTIVE TEAMS</div>
       <div class="team-item"><span class="team-dot active"></span><span class="team-name">TRADER</span><span class="team-model">deepseek-r1</span></div>
       <div class="team-item"><span class="team-dot active"></span><span class="team-name">RESEARCH</span><span class="team-model">phi3:mini</span></div>
@@ -1054,21 +1202,32 @@ body::after{
   <span>MEMORIES <span class="uptime-val" id="b-memories">--</span></span>
   <span class="sep">|</span>
   <span class="version-val" id="b-version">v--</span>
-  <span style="margin-left:auto;color:#334">AL iKON UNLIMITED LLC</span>
+  <span style="margin-left:auto;color:rgba(255,140,0,.2)">AL iKON UNLIMITED LLC</span>
 </div>
 
 <script>
 // ── CONFIG ──
-const BRAIN_URL   = location.origin;
-const BRIDGE_KEY  = '';  // Set to your BRIDGE_KEY for authenticated endpoints
-// WebSocket connects to Brain's proxy (/ws) — Brain forwards to Commander on Thomas
-const BRAIN_WS    = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+const BRAIN_URL  = location.origin;
+const BRIDGE_KEY = '';
+const BRAIN_WS   = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+// ── STARS ──
+(function(){
+  const c = document.getElementById('stars');
+  for (let i = 0; i < 180; i++) {
+    const s = document.createElement('div');
+    s.className = 'star';
+    const sz = Math.random() * 2 + .5;
+    s.style.cssText = \`width:\${sz}px;height:\${sz}px;top:\${Math.random()*100}%;left:\${Math.random()*100}%;--d:\${(Math.random()*4+2).toFixed(1)}s;--op:\${(Math.random()*.7+.1).toFixed(2)};animation-delay:\${(Math.random()*5).toFixed(1)}s\`;
+    c.appendChild(s);
+  }
+})();
 
 // ── CLOCK ──
 function tickClock() {
   const now = new Date();
   document.getElementById('clock').textContent = now.toTimeString().slice(0,8);
-  document.getElementById('date').textContent = now.toDateString().toUpperCase();
+  document.getElementById('date').textContent  = now.toDateString().toUpperCase();
 }
 setInterval(tickClock, 1000);
 tickClock();
@@ -1077,6 +1236,7 @@ tickClock();
 const feedLog = document.getElementById('feed-log');
 const MAX_FEED = 150;
 function addFeed(cls, text) {
+  if (!text) return;
   const ts = new Date().toTimeString().slice(0,8);
   const line = document.createElement('div');
   line.className = \`feed-line \${cls}\`;
@@ -1087,7 +1247,7 @@ function addFeed(cls, text) {
 }
 function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ── WEBSOCKET TO COMMANDER ──
+// ── WEBSOCKET ──
 let ws = null, wsRetry = 0, wsRetryMax = 20;
 const connEl = document.getElementById('conn-status');
 
@@ -1095,31 +1255,18 @@ function connectWS() {
   if (ws && ws.readyState < 2) return;
   connEl.className = 'connecting';
   connEl.textContent = '◉ CONNECTING';
-  addFeed('sys', \`Connecting via Brain relay…\`);
-  try {
-    ws = new WebSocket(BRAIN_WS);
-  } catch(e) {
-    scheduleReconnect('WebSocket not supported');
-    return;
-  }
+  addFeed('sys', 'Connecting via Brain relay…');
+  try { ws = new WebSocket(BRAIN_WS); }
+  catch(e) { scheduleReconnect('WebSocket not supported'); return; }
   ws.onopen = () => {
     wsRetry = 0;
     connEl.className = 'connected';
     connEl.textContent = '◉ LIVE';
     addFeed('sys', 'Commander feed connected ✓');
   };
-  ws.onmessage = (ev) => {
-    try {
-      const d = JSON.parse(ev.data);
-      handleWsMsg(d);
-    } catch(e) {}
-  };
-  ws.onclose = () => {
-    connEl.className = 'disconnected';
-    connEl.textContent = '◉ OFFLINE';
-    scheduleReconnect('Connection lost');
-  };
-  ws.onerror = () => {};
+  ws.onmessage = (ev) => { try { handleWsMsg(JSON.parse(ev.data)); } catch(e) {} };
+  ws.onclose   = () => { connEl.className='disconnected'; connEl.textContent='◉ OFFLINE'; scheduleReconnect('Connection lost'); };
+  ws.onerror   = () => {};
 }
 
 function scheduleReconnect(reason) {
@@ -1131,21 +1278,13 @@ function scheduleReconnect(reason) {
 }
 
 function handleWsMsg(d) {
-  if (d.t === 'log') { addFeed('log', d.msg); return; }
-  if (d.t === 'cmd') { addFeed('cmd', '▶ ' + d.input); return; }
-  if (d.t === 'err') { addFeed('err', '✖ ' + d.msg); return; }
-  if (d.t === 'sys') { addFeed('sys', d.msg); return; }
-  if (d.t === 'offline') { addFeed('err', '⚠ Thomas offline — HUD in standby'); return; }
-  if (d.t === 'buffer') {
-    // Replay buffered feed events
-    (d.items || []).forEach(item => handleWsMsg(item));
-    return;
-  }
-  if (d.t === 'hello' || d.t === 'stats') {
-    setStatus(d);
-    addFeed('sys', d.t === 'hello' ? \`Commander v\${d.version} handshake ✓\` : '');
-    return;
-  }
+  if (d.t === 'log')    { addFeed('log', d.msg); return; }
+  if (d.t === 'cmd')    { addFeed('cmd', '▶ ' + d.input); return; }
+  if (d.t === 'err')    { addFeed('err', '✖ ' + d.msg); return; }
+  if (d.t === 'sys')    { addFeed('sys', d.msg); return; }
+  if (d.t === 'offline'){ addFeed('err', '⚠ Thomas offline — HUD in standby'); return; }
+  if (d.t === 'buffer') { (d.items||[]).forEach(item => handleWsMsg(item)); return; }
+  if (d.t === 'hello' || d.t === 'stats') { setStatus(d); if(d.t==='hello') addFeed('sys',\`Commander v\${d.version} handshake ✓\`); return; }
 }
 
 function setStatus(d) {
@@ -1153,22 +1292,24 @@ function setStatus(d) {
     const el = document.getElementById(id);
     if (!el) return;
     el.textContent = val;
-    el.className = 'stat-val ' + (okTest == null ? '' : okTest ? 'ok' : 'off');
+    if (okTest != null) el.className = 'stat-val ' + (okTest ? 'ok' : 'off');
   };
   if (d.version) {
-    set('sv-version', 'v' + d.version);
-    document.getElementById('b-version').textContent = 'v' + d.version;
+    set('sv-version', 'v'+d.version);
+    document.getElementById('b-version').textContent = 'v'+d.version;
+    document.getElementById('os-version').textContent = 'v'+d.version;
   }
   if (d.uptime != null) {
     const u = formatUptime(d.uptime);
     set('sv-uptime', u);
     document.getElementById('b-uptime').textContent = u;
+    document.getElementById('os-uptime').textContent = u;
   }
-  if (d.deepseek != null) set('sv-ds',    d.deepseek ? 'READY' : 'OFFLINE', d.deepseek);
-  if (d.tts     != null) set('sv-tts',   d.tts    ? 'ACTIVE' : 'OFFLINE', d.tts);
-  if (d.wake    != null) set('sv-wake',  d.wake   ? 'ACTIVE' : 'OFFLINE', d.wake);
-  if (d.brain   != null) set('sv-brain', d.brain  ? 'LINKED' : 'OFFLINE', d.brain);
-  if (d.clients != null) set('sv-clients', d.clients);
+  if (d.deepseek != null) set('sv-ds',    d.deepseek ? 'READY'  : 'OFFLINE', d.deepseek);
+  if (d.tts      != null) set('sv-tts',   d.tts     ? 'ACTIVE' : 'OFFLINE', d.tts);
+  if (d.wake     != null) set('sv-wake',  d.wake    ? 'ACTIVE' : 'OFFLINE', d.wake);
+  if (d.brain    != null) set('sv-brain', d.brain   ? 'LINKED' : 'OFFLINE', d.brain);
+  if (d.clients  != null) set('sv-clients', d.clients);
 }
 
 function formatUptime(s) {
@@ -1176,7 +1317,7 @@ function formatUptime(s) {
   return [h,m,sec].map(n=>String(n).padStart(2,'0')).join(':');
 }
 
-// ── TRADER DATA ──
+// ── TRADER ──
 async function loadTrader() {
   try {
     const r = await fetch('https://xauusd-trader-80p0.onrender.com/api/state');
@@ -1188,33 +1329,35 @@ async function loadTrader() {
     document.getElementById('t-open').textContent    = d.openTrades || 0;
     document.getElementById('t-losses').textContent  = d.consecutiveLosses || 0;
     document.getElementById('t-ts').textContent      = new Date().toTimeString().slice(0,8);
-  } catch(e) {
-    document.getElementById('t-price').textContent = 'OFFLINE';
-  }
+  } catch(e) { document.getElementById('t-price').textContent = 'OFFLINE'; }
 }
 
 // ── BRAIN DATA ──
 async function loadBrainData() {
   try {
-    const headers = BRIDGE_KEY ? { 'x-bridge-key': BRIDGE_KEY } : {};
-    const r = await fetch(\`\${BRAIN_URL}/status\`, { headers });
+    const headers = BRIDGE_KEY ? {'x-bridge-key': BRIDGE_KEY} : {};
+    const r = await fetch(\`\${BRAIN_URL}/status\`, {headers});
     const d = await r.json();
-    document.getElementById('b-cycles').textContent   = d.cycle_count || '--';
-    document.getElementById('b-memories').textContent = d.total_memories || '--';
+    const cycles = d.cycle_count || '--';
+    const mems   = d.total_memories || '--';
+    document.getElementById('b-cycles').textContent   = cycles;
+    document.getElementById('b-memories').textContent = mems;
+    document.getElementById('os-cycles').textContent  = cycles;
+    document.getElementById('os-memories').textContent = mems;
   } catch(e) {}
 }
 
 async function loadOpportunities() {
   try {
-    const headers = BRIDGE_KEY ? { 'x-bridge-key': BRIDGE_KEY } : {};
-    const r = await fetch(\`\${BRAIN_URL}/opportunities\`, { headers });
+    const headers = BRIDGE_KEY ? {'x-bridge-key': BRIDGE_KEY} : {};
+    const r = await fetch(\`\${BRAIN_URL}/opportunities\`, {headers});
     const d = await r.json();
     const list = document.getElementById('opp-list');
-    if (!d.items?.length) { list.innerHTML = '<div style="color:var(--dim);font-size:.7rem">No opportunities scored yet.</div>'; return; }
-    list.innerHTML = d.items.slice(0,4).map(o => \`
+    if (!d.items?.length) { list.innerHTML = '<div style="color:rgba(255,140,0,.3);font-size:.67rem">No opportunities scored yet.</div>'; return; }
+    list.innerHTML = d.items.slice(0,4).map(o=>\`
 <div class="opp-item">
   <span class="opp-score">\${(o.score||0).toFixed(1)}</span>
-  <div class="opp-branch">\${o.branch?.toUpperCase()}</div>
+  <div class="opp-branch">\${(o.branch||'').toUpperCase()}</div>
   <div class="opp-text">\${escapeHtml((o.content||'').substring(0,120))}</div>
 </div>\`).join('');
   } catch(e) {}
@@ -1225,9 +1368,9 @@ async function loadMemoryFeed() {
     const r = await fetch(\`\${BRAIN_URL}/memory?limit=20\`);
     const d = await r.json();
     const scroll = document.getElementById('memory-scroll');
-    const items = d.items || d.memories || [];
-    if (!items.length) { scroll.innerHTML = '<div style="color:var(--dim);font-size:.7rem">No memories yet.</div>'; return; }
-    scroll.innerHTML = items.map(m => \`<div class="mem-line">
+    const items  = d.items || d.memories || [];
+    if (!items.length) { scroll.innerHTML = '<div style="color:rgba(255,140,0,.3);font-size:.67rem">No memories yet.</div>'; return; }
+    scroll.innerHTML = items.map(m=>\`<div class="mem-line">
       <div class="mem-branch">\${(m.branch||'').toUpperCase()} · \${m.type||m.memory_type||''}</div>
       <div class="mem-text">\${escapeHtml((m.content||m.insight||'').substring(0,120))}</div>
     </div>\`).join('');
@@ -1240,10 +1383,10 @@ loadTrader();
 loadBrainData();
 loadOpportunities();
 loadMemoryFeed();
-setInterval(loadTrader,       60000);
-setInterval(loadBrainData,    30000);
+setInterval(loadTrader,        60000);
+setInterval(loadBrainData,     30000);
 setInterval(loadOpportunities, 60000);
-setInterval(loadMemoryFeed,   45000);
+setInterval(loadMemoryFeed,    45000);
 </script>
 </body>
 </html>`;
