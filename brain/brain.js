@@ -1686,98 +1686,99 @@ async function main() {
 
   const server = require('http').createServer(app);
 
-  // ─── REVERSE RELAY ARCHITECTURE (v1.1) ───────────────────────────────────────
-  // Thomas dials OUT to Brain /relay on startup — no Tailscale inbound needed.
-  // Brain holds that socket as the live Commander feed.
-  // HUD browsers connect to /ws and receive the feed from Brain's buffer + relay.
-  if (WS) {
-    const { WebSocketServer } = WS;
+  // ─── REVERSE RELAY ARCHITECTURE (v2.0 — SSE/HTTP POST) ─────────────────────
+  // Railway's nginx proxy forces WebSocket permessage-deflate at the infrastructure
+  // level regardless of app-level perMessageDeflate:false — causing RSV1 frame errors.
+  // Fix: use plain HTTP for the Commander→Brain leg (no WebSocket upgrade = no proxy interference).
+  //   Commander → POST /relay/push  (send events)
+  //   HUD browsers ← GET /relay/stream  (SSE, receive events)
+  //   HUD browsers ↔ /ws  (WebSocket, unchanged — browser WS still works fine)
+  //   POST /relay/command  (HUD → Brain → Commander via pending queue)
 
-    // Persistent Commander relay socket (Thomas → Brain)
-    let commanderRelayWs = null;
-    let commanderConnected = false;
+  let commanderConnected = false;
+  let commanderLastSeen = 0;
+  const sseClients = new Set();   // SSE subscribers (not used for Commander→HUD; that's hudWss)
+  const commandQueue = [];        // Commands queued from HUD for Commander to poll
 
-    // /relay — Commander connects here on startup
-    // perMessageDeflate: false — Railway's nginx proxy mangles compressed frames regardless
-    // of compression settings; disabling compression entirely prevents RSV1/FIN frame errors.
-    const relayWss = new WebSocketServer({
-      server,
-      path: '/relay',
-      perMessageDeflate: false
-    });
-    relayWss.on('connection', (ws, req) => {
-      // Auth check
-      const key = req.headers['x-bridge-key'] || new URL('http://x' + req.url).searchParams.get('key');
-      if (process.env.BRIDGE_KEY && key !== process.env.BRIDGE_KEY) {
-        ws.close(4401, 'unauthorized');
-        log('RELAY: rejected unauthorized connection');
-        return;
-      }
-
-      // Replace any old relay socket — null it out FIRST so its close event doesn't clear the new one
-      if (commanderRelayWs && commanderRelayWs !== ws) {
-        const old = commanderRelayWs;
-        commanderRelayWs = null;
-        if (old._keepAlive) clearInterval(old._keepAlive);
-        try { if (old.readyState < 2) old.close(); } catch(e) {}
-      }
-      commanderRelayWs = ws;
-      commanderConnected = true;
-      log('RELAY: Commander connected from Thomas ✓');
-
-      // Brain-side keep-alive: ping Commander every 8s to prevent Render proxy idle timeout
-      ws._keepAlive = setInterval(() => {
-        if (ws.readyState === 1) {
-          try { ws.ping(); } catch(e) {}
-        } else {
-          clearInterval(ws._keepAlive);
-        }
-      }, 8000);
-
-      // Notify all HUD browsers
-      hudWss.clients.forEach(browser => {
-        if (browser.readyState === 1)
-          browser.send(JSON.stringify({ t: 'sys', msg: 'Commander connected via Brain relay ✓' }));
-      });
-
-      ws.on('message', (data) => {
-        try {
-          const msg = data.toString();
-          const parsed = JSON.parse(msg);
-          // Ignore keep-alive pings — don't buffer or forward them
-          if (parsed.t === 'ping') return;
-          bufferFeed(parsed);
-          // Forward to all HUD browsers
-          hudWss.clients.forEach(browser => {
-            if (browser.readyState === 1) browser.send(msg);
-          });
-        } catch(e) {}
-      });
-
-      ws.on('close', () => {
-        if (ws._keepAlive) clearInterval(ws._keepAlive);
-        // Only clear if this is still the active relay socket (not already replaced)
-        if (commanderRelayWs === ws) {
-          commanderConnected = false;
-          commanderRelayWs = null;
-        }
-        log('RELAY: Commander disconnected');
-        hudWss.clients.forEach(browser => {
+  // Commander heartbeat watchdog — mark offline if no POST in 20s
+  setInterval(() => {
+    if (commanderConnected && Date.now() - commanderLastSeen > 20000) {
+      commanderConnected = false;
+      log('RELAY: Commander heartbeat timeout — marking offline');
+      if (WS) {
+        const { hudWss } = app.locals;
+        if (hudWss) hudWss.clients.forEach(browser => {
           if (browser.readyState === 1)
             browser.send(JSON.stringify({ t: 'offline', msg: 'Thomas offline — HUD in standby' }));
         });
+      }
+    }
+  }, 5000);
+
+  // POST /relay/push — Commander posts events here (replaces WebSocket relay)
+  app.post('/relay/push', (req, res) => {
+    const key = req.headers['x-bridge-key'];
+    if (process.env.BRIDGE_KEY && key !== process.env.BRIDGE_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const body = req.body;
+    if (!body || typeof body !== 'object') return res.status(400).json({ error: 'bad body' });
+
+    const wasConnected = commanderConnected;
+    commanderConnected = true;
+    commanderLastSeen = Date.now();
+
+    // Notify HUD browsers on first connect
+    if (!wasConnected) {
+      log('RELAY: Commander connected via HTTP POST ✓');
+      const { hudWss } = app.locals;
+      if (hudWss) hudWss.clients.forEach(browser => {
+        if (browser.readyState === 1)
+          browser.send(JSON.stringify({ t: 'sys', msg: 'Commander connected via Brain relay ✓' }));
       });
+    }
 
-      ws.on('error', () => {});
-    });
+    // Ignore keep-alive pings — don't buffer or forward them
+    if (body.t !== 'ping' && body.t !== 'heartbeat') {
+      const msg = JSON.stringify(body);
+      bufferFeed(body);
+      // Forward to all HUD browsers via WebSocket
+      const { hudWss } = app.locals;
+      if (hudWss) hudWss.clients.forEach(browser => {
+        if (browser.readyState === 1) try { browser.send(msg); } catch(e) {}
+      });
+    }
 
-    // /ws — HUD browsers connect here
-    // perMessageDeflate: false — same as /relay, prevents Railway proxy frame corruption
+    // Return any queued commands for Commander to execute
+    const pending = commandQueue.splice(0);
+    res.json({ ok: true, commands: pending });
+  });
+
+  // POST /relay/command — HUD browser sends a command to Commander via Brain
+  app.post('/relay/command', (req, res) => {
+    const body = req.body;
+    if (!body || !body.command) return res.status(400).json({ error: 'missing command' });
+    commandQueue.push(body);
+    log(`RELAY: command queued for Commander: ${body.command}`);
+    res.json({ ok: true });
+  });
+
+  // GET /relay/status — simple connection status check
+  app.get('/relay/status', (req, res) => {
+    res.json({ commanderConnected, lastSeen: commanderLastSeen, queueDepth: commandQueue.length });
+  });
+
+  if (WS) {
+    const { WebSocketServer } = WS;
+
+    // /ws — HUD browsers connect here (unchanged — browser WS unaffected by Railway proxy)
     const hudWss = new WebSocketServer({
       server,
       path: '/ws',
       perMessageDeflate: false
     });
+    app.locals.hudWss = hudWss;  // expose for relay POST handlers above
+
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
 
@@ -1792,18 +1793,19 @@ async function main() {
         browserWs.send(JSON.stringify({ t: 'offline', msg: 'Thomas offline — HUD in standby' }));
       }
 
-      // Forward browser commands to Commander relay
+      // Forward browser commands to Commander via queue (Commander polls on next POST)
       browserWs.on('message', (data) => {
-        if (commanderRelayWs && commanderRelayWs.readyState === 1) {
-          try { commanderRelayWs.send(data.toString()); } catch(e) {}
-        }
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.command) commandQueue.push(msg);
+        } catch(e) {}
       });
 
       browserWs.on('close', () => log('HUD: browser disconnected'));
       browserWs.on('error', () => {});
     });
 
-    log('HUD: reverse relay ready — /relay (Commander) + /ws (browsers)');
+    log('HUD: SSE relay ready — POST /relay/push (Commander) + /ws (browsers)');
   }
 
   server.listen(PORT, () => log(`HTTP: listening on port ${PORT}`));
