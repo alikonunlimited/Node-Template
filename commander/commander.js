@@ -26,7 +26,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '2.6',
+  version:       '2.7',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -356,29 +356,24 @@ print("[VOICE] Done.", flush=True)
   fs.writeFileSync(CONFIG.voiceRecorder, script);
 }
 
-// Returns { cmd, args } — whisper may be a python script wrapper
+// Returns { cmd, args } — finds whisper exe by checking file existence, not running it
 function findWhisper() {
-  // Try direct executables first
-  for (const p of CONFIG.whisperPaths) {
-    try { execSync(`"${p}" --help`, { stdio: 'ignore', timeout: 5000 }); return { cmd: p, args: [] }; }
-    catch(e) {}
-  }
-  // Try as python script (Windows pip sometimes installs as script, not exe)
-  const scriptPaths = [
-    'C:\\Python314\\Scripts\\whisper',
-    'C:\\Python313\\Scripts\\whisper',
-    'C:\\Python312\\Scripts\\whisper',
-    (process.env.USERPROFILE || '') + '\\AppData\\Roaming\\Python\\Python314\\Scripts\\whisper',
+  const candidates = [
+    'C:\\Python314\\Scripts\\whisper.exe',
+    'C:\\Python313\\Scripts\\whisper.exe',
+    'C:\\Python312\\Scripts\\whisper.exe',
+    'C:\\Python311\\Scripts\\whisper.exe',
+    (process.env.USERPROFILE || '') + '\\AppData\\Roaming\\Python\\Python314\\Scripts\\whisper.exe',
+    (process.env.USERPROFILE || '') + '\\AppData\\Local\\Programs\\Python\\Python314\\Scripts\\whisper.exe',
   ];
-  const pythons = ['python', 'python3', 'C:\\Python314\\python.exe'];
-  for (const py of pythons) {
-    for (const script of scriptPaths) {
-      try {
-        execSync(`"${py}" "${script}" --help`, { stdio: 'ignore', timeout: 5000 });
-        return { cmd: py, args: [script] };
-      } catch(e) {}
-    }
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return { cmd: p, args: [] };
   }
+  // Also try bare 'whisper' on PATH by checking if it resolves
+  try {
+    const found = execSync('where whisper', { encoding: 'utf8', timeout: 3000 }).trim().split('\n')[0].trim();
+    if (found && fs.existsSync(found)) return { cmd: found, args: [] };
+  } catch(e) {}
   return null;
 }
 
