@@ -440,6 +440,49 @@ app.post('/api/close', async (req, res) => {
 // Health endpoint — used by keep-alive ping
 app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime(), trades: state.trades.length }));
 
+// ─── CLAUDE RELAY — forwards Claude messages to Commander bridge ──────────────
+// Claude POSTs here (trader is on allowed domain). Trader forwards to bridge.
+app.post('/api/claude-relay', async (req, res) => {
+  const { content, type = 'report', relay_key } = req.body || {};
+  if (relay_key !== (process.env.RELAY_KEY || 'aikon-relay')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!content) return res.status(400).json({ error: 'Missing content' });
+
+  const bridgeUrl = process.env.BRIDGE_URL;
+  const bridgeKey = process.env.BRIDGE_KEY;
+  if (!bridgeUrl || !bridgeKey) {
+    return res.status(503).json({ error: 'Bridge not configured on trader service' });
+  }
+
+  try {
+    // Forward to commander bridge
+    const https = require('https');
+    const body  = JSON.stringify({ from: 'claude', to: 'commander', type, content });
+    const u     = new URL(bridgeUrl + '/send');
+    await new Promise((resolve, reject) => {
+      const req2 = https.request({
+        hostname: u.hostname, path: u.pathname,
+        method: 'POST', port: 443,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'x-bridge-key': bridgeKey
+        },
+        timeout: 10000
+      }, r => { r.resume(); r.on('end', resolve); });
+      req2.on('error', reject);
+      req2.on('timeout', () => { req2.destroy(); reject(new Error('timeout')); });
+      req2.write(body); req2.end();
+    });
+    addLog(`[Relay] Claude → Commander: ${content.substring(0, 80)}`);
+    res.json({ ok: true, forwarded: true });
+  } catch(e) {
+    addLog(`[Relay] Error: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CRON — midnight UTC daily summary
 // ─────────────────────────────────────────────────────────────────────────────
