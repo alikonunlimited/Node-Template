@@ -26,7 +26,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '2.5',
+  version:       '2.6',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -356,15 +356,38 @@ print("[VOICE] Done.", flush=True)
   fs.writeFileSync(CONFIG.voiceRecorder, script);
 }
 
+// Returns { cmd, args } — whisper may be a python script wrapper
 function findWhisper() {
+  // Try direct executables first
   for (const p of CONFIG.whisperPaths) {
-    try { execSync(`"${p}" --help`, { stdio: 'ignore', timeout: 5000 }); return p; }
+    try { execSync(`"${p}" --help`, { stdio: 'ignore', timeout: 5000 }); return { cmd: p, args: [] }; }
     catch(e) {}
+  }
+  // Try as python script (Windows pip sometimes installs as script, not exe)
+  const scriptPaths = [
+    'C:\\Python314\\Scripts\\whisper',
+    'C:\\Python313\\Scripts\\whisper',
+    'C:\\Python312\\Scripts\\whisper',
+    (process.env.USERPROFILE || '') + '\\AppData\\Roaming\\Python\\Python314\\Scripts\\whisper',
+  ];
+  const pythons = ['python', 'python3', 'C:\\Python314\\python.exe'];
+  for (const py of pythons) {
+    for (const script of scriptPaths) {
+      try {
+        execSync(`"${py}" "${script}" --help`, { stdio: 'ignore', timeout: 5000 });
+        return { cmd: py, args: [script] };
+      } catch(e) {}
+    }
   }
   return null;
 }
 
 function whisperAvailable() { return !!findWhisper(); }
+
+function spawnWhisper(whisper, wavPath, extraArgs) {
+  // whisper = { cmd, args } where args may be [scriptPath] or []
+  return spawn(whisper.cmd, [...whisper.args, wavPath, ...extraArgs]);
+}
 
 function recordVoice(seconds = 5) {
   return new Promise((resolve, reject) => {
@@ -385,10 +408,10 @@ function recordVoice(seconds = 5) {
 function transcribeWhisper(wavPath) {
   return new Promise((resolve, reject) => {
     print('⚙️  Transcribing...');
-    const whisperBin = findWhisper();
-    if (!whisperBin) { reject(new Error('Whisper not found. Run: pip install openai-whisper')); return; }
+    const whisper = findWhisper();
+    if (!whisper) { reject(new Error('Whisper not found. Run: pip install openai-whisper')); return; }
     const outDir = path.dirname(wavPath);
-    const proc = spawn(whisperBin, [wavPath,
+    const proc = spawnWhisper(whisper, wavPath, [
       '--model', CONFIG.whisperModel,
       '--language', 'en',
       '--output_format', 'txt',
@@ -459,8 +482,10 @@ async function handleCommand(input, rl) {
         const pyCheck = runShell('python --version');
         const sdCheck = runShell('python -c "import sounddevice; print(sounddevice.__version__)"');
         const sfCheck = runShell('python -c "import soundfile; print(soundfile.__version__)"');
-        const whisperPath = findWhisper();
-        const wsCheck = whisperPath ? `found ✅  (${whisperPath})` : 'NOT FOUND ❌  →  pip install openai-whisper';
+        const whisperFound = findWhisper();
+        const wsCheck = whisperFound
+          ? `found ✅  (${whisperFound.cmd}${whisperFound.args.length ? ' ' + whisperFound.args[0] : ''})`
+          : 'NOT FOUND ❌  →  pip install openai-whisper';
         print([
           `Python:       ${pyCheck}`,
           `sounddevice:  ${sdCheck}`,
