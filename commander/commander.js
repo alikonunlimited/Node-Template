@@ -318,7 +318,9 @@ function startBrainRelay() {
     log(`RELAY: connecting to Brain at ${wsUrl}`);
     let ws;
     try {
-      ws = new WebSocketClient(wsUrl, { headers, handshakeTimeout: 10000, perMessageDeflate: false });
+      // Railway's proxy forces permessage-deflate regardless of perMessageDeflate:false.
+      // Set to true so ws actually negotiates and decompresses — avoids RSV1 frame errors.
+      ws = new WebSocketClient(wsUrl, { headers, handshakeTimeout: 10000, perMessageDeflate: true });
     } catch(e) {
       log(`RELAY: connect error — ${e.message} — retry in 30s`);
       setTimeout(connect, 30000);
