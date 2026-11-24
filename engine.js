@@ -589,6 +589,8 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   const sizeM = getSizeMultiplier(0.5);
   if (sizeM === 0) return { action:'wait', tradeType, reason:`Paused — ${performance.consecutiveLosses} straight losses`, confidence:0, bullScore:0, bearScore:0 };
 
+  let bull = 0, bear = 0;  // declared before makeDecision so closure can reference them
+
   const makeDecision = (action, reason, conf, conditions) => {
     const sl_dist = Math.min(target.pips_sl, MAX_LOSS_PER_TRADE / (lots * 100));
     const tp = action === 'buy' ? parseFloat((price + target.pips_tp).toFixed(2)) : parseFloat((price - target.pips_tp).toFixed(2));
@@ -601,7 +603,6 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   const { rsi, stoch, macd, momentum, trend, ema_align } = indicators;
   const isBest  = YOUR_PATTERNS.bestHoursUTC.includes(hourUTC);
   const isWorst = YOUR_PATTERNS.worstHoursUTC.includes(hourUTC);
-  let bull = 0, bear = 0;  // declared before HTF so early-return can reference them
   const log = [], activeConditions = [];
 
   // ── HTF (Higher Timeframe) Analysis ──────────────────────────────────────────
