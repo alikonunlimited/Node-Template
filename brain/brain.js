@@ -1698,7 +1698,17 @@ async function main() {
     let commanderConnected = false;
 
     // /relay — Commander connects here on startup
-    const relayWss = new WebSocketServer({ server, path: '/relay', perMessageDeflate: { threshold: Infinity } });
+    // handleProtocols strips Sec-WebSocket-Extensions so Railway nginx proxy compression is rejected
+    const relayWss = new WebSocketServer({
+      server,
+      path: '/relay',
+      perMessageDeflate: false,
+      handleProtocols: (protocols, req) => {
+        // Strip any compression extension the proxy may have injected
+        delete req.headers['sec-websocket-extensions'];
+        return false; // no subprotocol
+      }
+    });
     relayWss.on('connection', (ws, req) => {
       // Auth check
       const key = req.headers['x-bridge-key'] || new URL('http://x' + req.url).searchParams.get('key');
@@ -1766,7 +1776,7 @@ async function main() {
     });
 
     // /ws — HUD browsers connect here
-    const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: { threshold: Infinity } });
+    const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: false });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
 
