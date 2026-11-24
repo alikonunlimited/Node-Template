@@ -318,11 +318,7 @@ function startBrainRelay() {
     log(`RELAY: connecting to Brain at ${wsUrl}`);
     let ws;
     try {
-      ws = new WebSocketClient(wsUrl, {
-        headers: { ...headers, 'Sec-WebSocket-Extensions': '' },
-        handshakeTimeout: 10000,
-        perMessageDeflate: false
-      });
+      ws = new WebSocketClient(wsUrl, { headers, handshakeTimeout: 10000 });
     } catch(e) {
       log(`RELAY: connect error — ${e.message} — retry in 30s`);
       setTimeout(connect, 30000);
