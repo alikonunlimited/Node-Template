@@ -561,6 +561,7 @@ function checkSwingReentry(price, history, direction, htf, vol) {
 // ── DECISION ENGINE ───────────────────────────────────────────────────────────
 function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp', extraData = {}) {
   const target = TRADE_TARGETS[tradeType];
+  if (!target) return { action:'wait', tradeType, reason:`Invalid tradeType: ${tradeType}`, confidence:0, bullScore:0, bearScore:0 };
   const lots   = getLotSize(consecutiveWins);
 
   const now = new Date();
@@ -612,7 +613,8 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
   const htf = extraData.htf || computeHTF(price, priceHistory);
   if (htf.htfBull)       { bull += getConditionWeight('htf_confirmed', 2); log.push('HTF bull'); activeConditions.push('htf_confirmed'); }
   else if (htf.htfBear)  { bear += getConditionWeight('htf_confirmed', 2); log.push('HTF bear'); activeConditions.push('htf_confirmed'); }
-  else                   { bull -= 0.5; bear -= 0.5; log.push('HTF conflicted'); activeConditions.push('htf_conflicted'); }
+  else                   { bull -= 0.5; bear -= 0.5; log.push('HTF conflicted'); activeConditions.push('htf_conflicted');
+                           return { action:'wait', tradeType, reason:'HTF conflicted — all modes paused until alignment', confidence:0, bullScore:bull, bearScore:bear }; }
 
   // Full 3-TF alignment gives bonus
   if (htf.fullBullAlign) { bull += 1.5; log.push('D1+H4+H1 bull align'); }
@@ -709,7 +711,7 @@ function decide(price, indicators, hourUTC, consecutiveWins, tradeType = 'scalp'
 
   const topScore   = Math.max(bull, bear);
   const confidence = Math.min(topScore / 10, 1);
-  const minScore   = performance.consecutiveLosses >= 3 ? 5 : 3;
+  const minScore   = performance.consecutiveLosses >= 3 ? 6 : 4; // raised floor: was 5:3
 
   if (topScore < minScore) return { action:'wait', tradeType, reason:`Score ${topScore.toFixed(1)} < ${minScore} | ${log.join(' · ')}`, confidence, bullScore:bull, bearScore:bear };
 
