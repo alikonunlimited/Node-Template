@@ -1698,17 +1698,12 @@ async function main() {
     let commanderConnected = false;
 
     // /relay — Commander connects here on startup
-    // clientNoContextTakeover + serverNoContextTakeover: stateless compression, no shared context
-    // between messages — prevents decompression errors when Railway proxy intercepts frames
+    // perMessageDeflate: false — Railway's nginx proxy mangles compressed frames regardless
+    // of compression settings; disabling compression entirely prevents RSV1/FIN frame errors.
     const relayWss = new WebSocketServer({
       server,
       path: '/relay',
-      perMessageDeflate: {
-        zlibDeflateOptions: { level: 1 },
-        clientNoContextTakeover: true,
-        serverNoContextTakeover: true,
-        threshold: 1024
-      }
+      perMessageDeflate: false
     });
     relayWss.on('connection', (ws, req) => {
       // Auth check
@@ -1777,15 +1772,11 @@ async function main() {
     });
 
     // /ws — HUD browsers connect here
+    // perMessageDeflate: false — same as /relay, prevents Railway proxy frame corruption
     const hudWss = new WebSocketServer({
       server,
       path: '/ws',
-      perMessageDeflate: {
-        zlibDeflateOptions: { level: 1 },
-        clientNoContextTakeover: true,
-        serverNoContextTakeover: true,
-        threshold: 1024
-      }
+      perMessageDeflate: false
     });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
