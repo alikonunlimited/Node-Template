@@ -1698,7 +1698,7 @@ async function main() {
     let commanderConnected = false;
 
     // /relay — Commander connects here on startup
-    const relayWss = new WebSocketServer({ server, path: '/relay', perMessageDeflate: true });
+    const relayWss = new WebSocketServer({ server, path: '/relay', perMessageDeflate: { threshold: Infinity } });
     relayWss.on('connection', (ws, req) => {
       // Auth check
       const key = req.headers['x-bridge-key'] || new URL('http://x' + req.url).searchParams.get('key');
@@ -1766,7 +1766,7 @@ async function main() {
     });
 
     // /ws — HUD browsers connect here
-    const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: true });
+    const hudWss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: { threshold: Infinity } });
     hudWss.on('connection', (browserWs) => {
       log(`HUD: browser connected (${hudWss.clients.size} total)`);
 
