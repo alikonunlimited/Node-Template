@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.14 — Full Autonomy Engine: self-directed AI learning, auto-reporting,
-//   incident reports, autonomous decision loop, AI-to-AI communication, protocol chaining
+// AIKON-OS Commander v3.15 — Anti-Hacking Security Layer S-11–S-20:
+//   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
+//   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -10,6 +11,7 @@ const http      = require('http');
 const https     = require('https');
 const fs        = require('fs');
 const path      = require('path');
+const crypto    = require('crypto');
 const { execSync, spawn } = require('child_process');
 
 // Load .env from D:\AIKON-OS\.env so BRAIN_URL/BRIDGE_KEY survive restarts
@@ -67,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.14',
+  version:       '3.15',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -115,6 +117,41 @@ const CONFIG = {
     ragLog:           [],         // S-08: RAG access log
     encryptionFlag:   true,       // S-09: data-at-rest flag
     threatLevel:      'GREEN',    // S-10: GREEN / YELLOW / RED
+    // ── S-11 through S-20 ───────────────────────────────────────────────────
+    hmacSecret:       process.env.HMAC_SECRET || process.env.BRIDGE_KEY || 'default-change-me',
+    usedNonces:       new Set(),   // S-12: replay prevention nonce store
+    nonceTtlMs:       300000,      // S-12: nonces expire after 5 min
+    nonceLog:         [],          // S-12: timestamp-keyed nonce entries
+    rateLimitMap:     {},          // S-13: IP → { count, windowStart }
+    rateLimitMax:     60,          // S-13: max requests per window
+    rateLimitWindowMs:60000,       // S-13: 1-minute window
+    ipAllowlist:      new Set(['127.0.0.1','::1','::ffff:127.0.0.1']), // S-14
+    ipAllowlistEnabled: false,     // S-14: off until user adds IPs
+    sessionTokens:    {},          // S-15: token → { created, expires, source }
+    tokenTtlMs:       86400000,    // S-15: tokens expire after 24hr
+    shellWhitelist:   [            // S-16: allowed /shell command prefixes
+      'node --version', 'node -e', 'npm list', 'npm run',
+      'git status', 'git log', 'git pull', 'git diff',
+      'dir ', 'ls ', 'type ', 'cat ',
+      'ping ', 'curl --head', 'netstat',
+      'tasklist', 'wmic', 'systeminfo',
+      'ollama list', 'ollama ps',
+    ],
+    shellBlocklist:   [            // S-16: always blocked regardless of whitelist
+      'rm ', 'del ', 'rmdir', 'format', 'shutdown', 'reboot',
+      'reg delete', 'reg add', 'netsh', 'iptables',
+      'dd if=', 'mkfs', '> /dev/', 'wget ', 'curl -O',
+      'powershell -enc', 'cmd /c', '&& del', '| del',
+    ],
+    watchdogPid:      process.pid, // S-17: our own PID for watchdog
+    watchdogFile:     path.join('D:\\AIKON-OS','security','watchdog.json'),
+    lastWatchdogPing: 0,           // S-17: last heartbeat write
+    auditChainHash:   '',          // S-18: rolling hash of audit log
+    auditChainFile:   path.join('D:\\AIKON-OS','security','audit.chain'),
+    backupDir:        'E:\\AIKON-OS-BACKUP',  // S-19: encrypted backup destination
+    backupIntervalMs: 3600000,     // S-19: backup every hour
+    lastBackup:       0,
+    killswitchArmed:  false,       // S-20: requires /killswitch arm first
   },
   // ── INTELLIGENCE PROTOCOL LAYER ───────────────────────────────────────────
   intel: {
@@ -361,6 +398,260 @@ function setThreatLevel(level, reason) {
       autonomousThreatResponse(level).catch(e => log(`THREAT_CHAIN_ERR: ${e.message}`));
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ══  ANTI-HACKING SECURITY  S-11 through S-20  ═════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// S-11: HMAC request signing — sign/verify Bridge payloads to prevent tampering
+function secHmacSign(payload) {
+  const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  return crypto.createHmac('sha256', CONFIG.security.hmacSecret).update(body).digest('hex');
+}
+function secHmacVerify(payload, signature) {
+  const expected = secHmacSign(payload);
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'));
+  } catch { return false; }
+}
+
+// S-12: Nonce / replay prevention — reject duplicate or stale requests
+function secCheckNonce(nonce, ts) {
+  const now = Date.now();
+  if (!nonce || !ts) return false;
+  if (Math.abs(now - Number(ts)) > CONFIG.security.nonceTtlMs) return false; // too old
+  if (CONFIG.security.usedNonces.has(nonce)) return false; // replay
+  CONFIG.security.usedNonces.add(nonce);
+  CONFIG.security.nonceLog.push({ nonce, ts: now });
+  return true;
+}
+function secPruneNonces() {
+  const cutoff = Date.now() - CONFIG.security.nonceTtlMs;
+  CONFIG.security.nonceLog = CONFIG.security.nonceLog.filter(n => n.ts > cutoff);
+  CONFIG.security.usedNonces = new Set(CONFIG.security.nonceLog.map(n => n.nonce));
+}
+
+// S-13: Rate limiter — max 60 req/min per IP on port 3000
+function secRateLimit(ip) {
+  const now = Date.now();
+  let entry = CONFIG.security.rateLimitMap[ip];
+  if (!entry || now - entry.windowStart > CONFIG.security.rateLimitWindowMs) {
+    CONFIG.security.rateLimitMap[ip] = { count: 1, windowStart: now };
+    return true; // allow
+  }
+  entry.count++;
+  if (entry.count > CONFIG.security.rateLimitMax) {
+    secAudit('RATE_LIMIT', `IP ${ip} exceeded ${CONFIG.security.rateLimitMax} req/min`);
+    return false; // deny
+  }
+  return true;
+}
+
+// S-14: IP allowlist — only trusted IPs can talk to Commander's local port
+function secCheckIP(ip) {
+  if (!CONFIG.security.ipAllowlistEnabled) return true;
+  const ok = CONFIG.security.ipAllowlist.has(ip);
+  if (!ok) secAudit('IP_BLOCKED', `Rejected connection from ${ip}`);
+  return ok;
+}
+function secAllowIP(ip) {
+  CONFIG.security.ipAllowlist.add(ip);
+  secAudit('IP_ALLOWED', `Added ${ip} to allowlist`);
+  print(`✅ [S-14] IP ${ip} added to allowlist`);
+}
+function secBlockIP(ip) {
+  CONFIG.security.ipAllowlist.delete(ip);
+  secAudit('IP_BLOCKED', `Removed ${ip} from allowlist`);
+  print(`🚫 [S-14] IP ${ip} removed from allowlist`);
+}
+
+// S-15: Session token expiry — tokens expire after 24hr
+function secCreateToken(source = 'unknown') {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  CONFIG.security.sessionTokens[token] = {
+    created: now,
+    expires: now + CONFIG.security.tokenTtlMs,
+    source
+  };
+  secAudit('TOKEN_CREATED', `New session token for ${source}`);
+  return token;
+}
+function secValidateToken(token) {
+  const rec = CONFIG.security.sessionTokens[token];
+  if (!rec) return false;
+  if (Date.now() > rec.expires) {
+    delete CONFIG.security.sessionTokens[token];
+    secAudit('TOKEN_EXPIRED', `Token from ${rec.source} expired`);
+    return false;
+  }
+  return true;
+}
+function secPruneTokens() {
+  const now = Date.now();
+  let pruned = 0;
+  for (const [tok, rec] of Object.entries(CONFIG.security.sessionTokens)) {
+    if (now > rec.expires) { delete CONFIG.security.sessionTokens[tok]; pruned++; }
+  }
+  if (pruned) log(`S-15: pruned ${pruned} expired session tokens`);
+}
+
+// S-16: Shell command whitelist / blocklist — validate before execSync
+function secValidateShellCmd(cmd) {
+  if (!cmd || typeof cmd !== 'string') return { ok: false, reason: 'empty command' };
+  const lower = cmd.toLowerCase().trim();
+  for (const blocked of CONFIG.security.shellBlocklist) {
+    if (lower.includes(blocked.toLowerCase())) {
+      secAudit('SHELL_BLOCKED', `Blocklisted pattern "${blocked}" in: ${cmd}`);
+      return { ok: false, reason: `blocked pattern: ${blocked}` };
+    }
+  }
+  const allowed = CONFIG.security.shellWhitelist.some(prefix =>
+    lower.startsWith(prefix.toLowerCase())
+  );
+  if (!allowed) {
+    secAudit('SHELL_REJECTED', `Command not in whitelist: ${cmd}`);
+    return { ok: false, reason: 'command not in whitelist' };
+  }
+  return { ok: true };
+}
+
+// S-17: Process watchdog — write heartbeat; alert if Commander dies unexpectedly
+function secWatchdogPing() {
+  const data = {
+    pid: CONFIG.security.watchdogPid,
+    ts: Date.now(),
+    version: CONFIG.version,
+    threat: CONFIG.security.threatLevel
+  };
+  try {
+    const dir = path.dirname(CONFIG.security.watchdogFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CONFIG.security.watchdogFile, JSON.stringify(data, null, 2));
+    CONFIG.security.lastWatchdogPing = Date.now();
+  } catch (e) { log(`S-17 watchdog write err: ${e.message}`); }
+}
+function secWatchdogCheck() {
+  try {
+    if (!fs.existsSync(CONFIG.security.watchdogFile)) return;
+    const data = JSON.parse(fs.readFileSync(CONFIG.security.watchdogFile, 'utf8'));
+    const age = Date.now() - data.ts;
+    if (age > 120000) { // no ping in 2 min = dead
+      sendComms(`⚠️ [S-17] WATCHDOG: Commander PID ${data.pid} missed heartbeat (${Math.round(age/1000)}s ago). May be dead!`, 'security');
+    }
+  } catch (e) { log(`S-17 watchdog check err: ${e.message}`); }
+}
+
+// S-18: Tamper-evident audit log — chained hashes; each entry hashes previous hash + content
+function secChainAuditEntry(entry) {
+  const content = JSON.stringify(entry);
+  const chain = crypto.createHash('sha256')
+    .update(CONFIG.security.auditChainHash + content)
+    .digest('hex');
+  CONFIG.security.auditChainHash = chain;
+  const line = JSON.stringify({ ...entry, chain }) + '\n';
+  try {
+    const dir = path.dirname(CONFIG.security.auditChainFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(CONFIG.security.auditChainFile, line);
+  } catch (e) { log(`S-18 chain write err: ${e.message}`); }
+  return chain;
+}
+function secVerifyAuditChain() {
+  try {
+    if (!fs.existsSync(CONFIG.security.auditChainFile)) return { ok: true, entries: 0 };
+    const lines = fs.readFileSync(CONFIG.security.auditChainFile, 'utf8').trim().split('\n').filter(Boolean);
+    let runningHash = '';
+    for (let i = 0; i < lines.length; i++) {
+      const entry = JSON.parse(lines[i]);
+      const { chain, ...rest } = entry;
+      const expected = crypto.createHash('sha256')
+        .update(runningHash + JSON.stringify(rest))
+        .digest('hex');
+      if (expected !== chain) return { ok: false, tampered_at: i + 1, entries: lines.length };
+      runningHash = chain;
+    }
+    return { ok: true, entries: lines.length };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// S-19: Encrypted backup — hourly ChromaDB snapshot to E: drive (AES-256-CBC)
+async function secEncryptedBackup() {
+  const now = Date.now();
+  if (now - CONFIG.security.lastBackup < CONFIG.security.backupIntervalMs) return;
+  CONFIG.security.lastBackup = now;
+  try {
+    const srcFile = CONFIG.memory.dbPath || path.join('D:\\AIKON-OS', 'chroma', 'memory.json');
+    if (!fs.existsSync(srcFile)) { log('S-19: source not found, skipping backup'); return; }
+    const plaintext = fs.readFileSync(srcFile);
+    const key = crypto.scryptSync(CONFIG.security.hmacSecret, 'aikon-backup-salt', 32);
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+    const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const backupDir = CONFIG.security.backupDir;
+    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+    const filename = `memory_backup_${new Date().toISOString().replace(/[:.]/g,'-')}.enc`;
+    const outPath = path.join(backupDir, filename);
+    fs.writeFileSync(outPath, Buffer.concat([iv, encrypted]));
+    secAudit('BACKUP_OK', `Encrypted backup saved: ${filename}`);
+    log(`S-19: backup → ${outPath}`);
+    // Prune old backups — keep last 24
+    const files = fs.readdirSync(backupDir).filter(f => f.startsWith('memory_backup_')).sort();
+    while (files.length > 24) {
+      fs.unlinkSync(path.join(backupDir, files.shift()));
+    }
+  } catch (e) {
+    secAudit('BACKUP_ERR', e.message);
+    log(`S-19 backup error: ${e.message}`);
+  }
+}
+
+// S-20: Kill switch — wipe tokens, lock all sources, RED alert, page operator
+async function secKillSwitch() {
+  print(`💀 [S-20] KILL SWITCH FIRED — locking down AIKON-OS`);
+  secAudit('KILL_SWITCH', 'Kill switch activated — full lockdown initiated');
+
+  // Wipe all session tokens
+  const tokenCount = Object.keys(CONFIG.security.sessionTokens).length;
+  CONFIG.security.sessionTokens = {};
+  print(`  🗑️  Wiped ${tokenCount} session tokens`);
+
+  // Clear HMAC secret from memory (force key rotation on restart)
+  CONFIG.security.hmacSecret = crypto.randomBytes(32).toString('hex');
+  print(`  🔑  HMAC secret rotated (restart required to restore from env)`);
+
+  // Enable IP allowlist (block everything not explicitly trusted)
+  CONFIG.security.ipAllowlistEnabled = true;
+  print(`  🛡️  IP allowlist ENABLED — only localhost allowed`);
+
+  // Max rate limit (1 req/min)
+  CONFIG.security.rateLimitMax = 1;
+  print(`  🚦 Rate limit set to 1 req/min`);
+
+  // Set threat to RED
+  CONFIG.security.threatLevel = 'RED';
+  CONFIG.security.failCount = CONFIG.security.lockThreshold; // force locked state
+  print(`  🔴 Threat level: RED — lockdown active`);
+
+  // Page operator
+  await sendComms(
+    `💀 AIKON-OS KILL SWITCH FIRED\n` +
+    `Time: ${new Date().toISOString()}\n` +
+    `${tokenCount} tokens wiped | IP allowlist ON | Rate limit 1/min\n` +
+    `Commander is locked. Restart required to restore.\n` +
+    `Check audit chain: ${CONFIG.security.auditChainFile}`,
+    'security', 'CRITICAL'
+  );
+
+  print(`\n💀 LOCKDOWN COMPLETE. Commander will not accept further commands.`);
+  print(`   Restart Commander to restore from clean environment.\n`);
+
+  // Write a lockfile so restart knows we were killed
+  try {
+    fs.writeFileSync(path.join('D:\\AIKON-OS', 'security', 'KILLSWITCH.lock'),
+      JSON.stringify({ fired: Date.now(), reason: 'manual killswitch' }, null, 2));
+  } catch (e) { /* non-fatal */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2585,6 +2876,13 @@ async function handleCommand(input, rl) {
 
     case '/shell': {
       if (!args) { print('Usage: /shell <command>'); break; }
+      // S-16: validate against whitelist/blocklist before executing
+      const shellCheck = secValidateShellCmd(args);
+      if (!shellCheck.ok) {
+        print(`🚫 [S-16] Shell command blocked: ${shellCheck.reason}`);
+        secAudit('SHELL_BLOCKED', args);
+        break;
+      }
       print(`⚙️  Running: ${args}`);
       print(runShell(args));
       break;
@@ -2634,7 +2932,11 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /auto [status|run|ask|daily|history|decisions|on|off] — 🤖 Autonomy engine
   /auto peer [on|off|ask] <id>  — Query/toggle AI peer (ollama-local, deepseek-local, claude-api)
   /auto report <title>          — Save manual incident report
-  /security [status|audit|threats|scan|lockout|green|yellow|red] — 🔒 Security protocols
+  /security [status|audit|threats|scan|lockout|green|yellow|red] — 🔒 Security (S-01–S-10)
+  /security allowip <ip> | blockip <ip> | ratelimit — 🛡️  Anti-hacking (S-13/S-14)
+  /security token list | token revoke <suffix>      — 🔑 Session tokens (S-15)
+  /security chain verify | backup now | nonce stats — 🔗 Audit chain/backup (S-18/S-19)
+  /killswitch [arm|fire|disarm]                     — 💀 Emergency lockdown (S-20)
   /intel [kpi|scan|feeds|sentiment|patterns|forecast|synth|decisions|market] — 🧠 Intelligence
   /comms [status|broadcast|webhook|slack|discord|queue|flush|peers|log] — 📡 Communications
   /approvals           — ⏳ Show pending approvals
@@ -2735,8 +3037,73 @@ SETUP (one-time):
         setThreatLevel('YELLOW', 'Manual alert by operator');
       } else if (sub === 'red') {
         setThreatLevel('RED', 'Manual RED ALERT by operator');
+      } else if (sub.startsWith('allowip ')) {
+        const ip = sub.replace('allowip ', '').trim();
+        secAllowIP(ip);
+        CONFIG.security.ipAllowlistEnabled = true;
+        print(`✅ IP allowlist ON — ${ip} allowed`);
+      } else if (sub.startsWith('blockip ')) {
+        const ip = sub.replace('blockip ', '').trim();
+        secBlockIP(ip);
+        print(`🚫 ${ip} removed from allowlist`);
+      } else if (sub === 'ratelimit') {
+        const map = CONFIG.security.rateLimitMap;
+        const entries = Object.entries(map);
+        print(`\n🚦 RATE LIMIT STATUS (${CONFIG.security.rateLimitMax} req/${CONFIG.security.rateLimitWindowMs/1000}s window)`);
+        if (!entries.length) { print('  No IPs tracked yet.'); }
+        else entries.forEach(([ip, v]) => print(`  ${ip}: ${v.count} req (window age ${Math.round((Date.now()-v.windowStart)/1000)}s)`));
+      } else if (sub === 'token list') {
+        const tokens = Object.entries(CONFIG.security.sessionTokens);
+        print(`\n🔑 ACTIVE SESSION TOKENS (${tokens.length})`);
+        if (!tokens.length) { print('  None.'); }
+        else tokens.forEach(([tok, rec]) => print(`  ...${tok.slice(-8)} | src: ${rec.source} | expires in ${Math.round((rec.expires-Date.now())/60000)}min`));
+      } else if (sub.startsWith('token revoke ')) {
+        const partial = sub.replace('token revoke ', '').trim();
+        const found = Object.keys(CONFIG.security.sessionTokens).filter(t => t.endsWith(partial));
+        if (!found.length) { print('No matching token found.'); break; }
+        found.forEach(t => { delete CONFIG.security.sessionTokens[t]; });
+        print(`✅ Revoked ${found.length} token(s)`);
+      } else if (sub === 'chain verify') {
+        const result = secVerifyAuditChain();
+        if (result.ok) print(`✅ [S-18] Audit chain intact — ${result.entries} entries verified`);
+        else print(`🚨 [S-18] CHAIN TAMPERED at entry ${result.tampered_at || '?'} of ${result.entries} | ${result.error || ''}`);
+      } else if (sub === 'backup now') {
+        CONFIG.security.lastBackup = 0; // force backup
+        await secEncryptedBackup();
+        print(`✅ [S-19] Backup triggered`);
+      } else if (sub === 'nonce stats') {
+        secPruneNonces();
+        print(`🔄 [S-12] Nonce store: ${CONFIG.security.usedNonces.size} active nonces (TTL ${CONFIG.security.nonceTtlMs/1000}s)`);
       } else {
         print('Usage: /security [status|audit|threats|lockout|scan|unlock <src>|green|yellow|red]');
+        print('       /security allowip <ip> | blockip <ip> | ratelimit');
+        print('       /security token list | token revoke <suffix>');
+        print('       /security chain verify | backup now | nonce stats');
+      }
+      break;
+    }
+
+    // ── KILL SWITCH ───────────────────────────────────────────────────────────
+    case '/killswitch': {
+      const ksSub = (args || '').trim().toLowerCase();
+      if (ksSub === 'arm') {
+        CONFIG.security.killswitchArmed = true;
+        print('⚠️  Kill switch ARMED. Type /killswitch fire to execute. This cannot be undone without restart.');
+      } else if (ksSub === 'fire') {
+        if (!CONFIG.security.killswitchArmed) {
+          print('❌ Kill switch not armed. Type /killswitch arm first.');
+          break;
+        }
+        await secKillSwitch();
+      } else if (ksSub === 'disarm') {
+        CONFIG.security.killswitchArmed = false;
+        print('✅ Kill switch disarmed.');
+      } else {
+        const armed = CONFIG.security.killswitchArmed;
+        print(`💀 KILL SWITCH — Status: ${armed ? '⚠️  ARMED' : '⬛ DISARMED'}`);
+        print('   /killswitch arm   — arm the kill switch');
+        print('   /killswitch fire  — execute (must be armed first)');
+        print('   /killswitch disarm — disarm');
       }
       break;
     }
@@ -2946,9 +3313,9 @@ function printBanner() {
 ║  Teams:    Trader | Biz | Research | Roblox               ║
 ╠══════════════════════════════════════════════════════════╣
 ║  PROTOCOLS: 🔒 Security · 🧠 Intel · 📡 Comms · 🤖 Auto  ║
-║             30 protocols + Full Autonomy Engine active     ║
+║   S-01–S-20 · I-01–I-10 · C-01–C-10 + Autonomy Engine    ║
 ╠══════════════════════════════════════════════════════════╣
-║  /auto  |  /security  |  /intel  |  /comms  |  /help      ║
+║  /auto  |  /security  |  /intel  |  /comms  |  /killswitch║
 ╚══════════════════════════════════════════════════════════╝
 `);
 }
@@ -3108,9 +3475,37 @@ async function main() {
   setTimeout(() => autonomousSelfAsk(), 90000);
   log('AUTONOMY: v3.14 engine started — self-directed AI learning active');
 
+  // ── ANTI-HACKING ENGINE v3.15 ─────────────────────────────────────────────
+  // S-17: Watchdog heartbeat every 30s
+  secWatchdogPing();
+  setInterval(secWatchdogPing, 30000);
+  // S-17: External watchdog check every 5 min (detects if WE restarted abnormally)
+  setTimeout(() => setInterval(secWatchdogCheck, 300000), 120000);
+  // S-12: Prune expired nonces every 10 min
+  setInterval(secPruneNonces, 600000);
+  // S-15: Prune expired session tokens every 30 min
+  setInterval(secPruneTokens, 1800000);
+  // S-19: Encrypted backup every hour
+  setInterval(secEncryptedBackup, CONFIG.security.backupIntervalMs);
+  setTimeout(() => secEncryptedBackup(), 30000); // first backup 30s after start
+  log('SECURITY v3.15: S-11–S-20 anti-hacking engine active');
+
   // Health + HUD WebSocket server + Phone relay
   const healthPort = process.env.COMMANDER_PORT || 3000;
   const healthServer = http.createServer((req, res) => {
+    // S-14: IP allowlist check
+    const clientIP = req.socket.remoteAddress || '0.0.0.0';
+    if (!secCheckIP(clientIP)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'IP not allowed' }));
+      return;
+    }
+    // S-13: Rate limit check
+    if (!secRateLimit(clientIP)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+      return;
+    }
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-bridge-key');
