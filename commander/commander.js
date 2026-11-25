@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.13 — 30 protocols: 10 Security + 10 Intelligence + 10 Communication
+// AIKON-OS Commander v3.14 — Full Autonomy Engine: self-directed AI learning, auto-reporting,
+//   incident reports, autonomous decision loop, AI-to-AI communication, protocol chaining
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +67,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.13',
+  version:       '3.14',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -144,6 +145,39 @@ const CONFIG = {
     messageQueue:     [],                               // C-09: outbound queue
     maxQueueSize:     100,
     channelPriority:  ['ntfy','webhook','slack','discord'], // C-10: delivery order
+  },
+  // ── AUTONOMY ENGINE ───────────────────────────────────────────────────────
+  autonomy: {
+    enabled:          true,
+    loopIntervalMs:   900000,       // master loop every 15 min
+    selfAskIntervalMs:3600000,      // AI self-questions every 1 hr
+    dailyReportHour:  8,            // daily summary push at 8am local
+    weeklyReportDay:  1,            // Monday = 1
+    lastDailyReport:  0,
+    lastWeeklyReport: 0,
+    lastSelfAsk:      0,
+    lastLoopRun:      0,
+    loopCount:        0,
+    decisionQueue:    [],           // pending autonomous actions
+    selfAskHistory:   [],           // questions Commander asked itself
+    incidentCount:    0,
+    reportDir:        'F:\\AIKON-OS\\logs\\reports',
+    // AI peers Commander can query
+    aiPeers: [
+      { id: 'ollama-local',  type: 'ollama',  url: 'http://localhost:11434', model: 'phi3:mini',       active: true  },
+      { id: 'deepseek-local',type: 'ollama',  url: 'http://localhost:11434', model: 'deepseek-r1:7b',  active: false },
+      { id: 'claude-api',    type: 'claude',  url: 'https://api.anthropic.com', model: 'claude-haiku-4-5', active: false },
+    ],
+    // Questions Commander asks itself autonomously
+    selfAskTopics: [
+      'What patterns in XAU/USD trading should I watch for?',
+      'What opportunities exist across all AIKON-OS business branches?',
+      'What security threats should I be aware of based on recent activity?',
+      'What should Al iKon prioritize today based on current system state?',
+      'Are there any anomalies or risks in the current trading session?',
+      'What can AIKON-OS improve to generate more revenue opportunities?',
+    ],
+    topicIndex: 0,
   },
 };
 
@@ -321,6 +355,10 @@ function setThreatLevel(level, reason) {
     if (level === 'RED') {
       sendComms(`🚨 AIKON-OS THREAT LEVEL RED: ${reason}`, 'security');
       print(`🔴 RED ALERT: Commander entering defensive mode. All external actions require manual /approve.`);
+    }
+    // AUTO: chain threat response (autonomousThreatResponse defined in autonomy engine)
+    if (typeof autonomousThreatResponse === 'function') {
+      autonomousThreatResponse(level).catch(e => log(`THREAT_CHAIN_ERR: ${e.message}`));
     }
   }
 }
@@ -601,6 +639,309 @@ async function commsHealthCheck() {
   results.push(`peers:   ${CONFIG.comms.peerNodes.length} node(s)`);
   results.push(`queue:   ${CONFIG.comms.messageQueue.length} pending`);
   return results.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ══  AUTONOMY ENGINE  v3.14  ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── INCIDENT REPORTER ─────────────────────────────────────────────────────────
+// Saves structured incident JSON to F:\AIKON-OS\logs\reports\
+async function saveIncidentReport(title, body, severity = 'INFO') {
+  CONFIG.autonomy.incidentCount++;
+  const ts    = new Date().toISOString().replace(/[:.]/g, '-');
+  const fname = `incident-${ts}-${severity}.json`;
+  const report = {
+    id:        `INC-${String(CONFIG.autonomy.incidentCount).padStart(4,'0')}`,
+    title,
+    severity,
+    timestamp: new Date().toISOString(),
+    version:   CONFIG.version,
+    threatLevel: CONFIG.security.threatLevel,
+    body,
+    kpi:       CONFIG.intel.kpiSnapshot,
+    auditTail: CONFIG.security.anomalyLog.slice(-10),
+  };
+  try {
+    const dir = CONFIG.autonomy.reportDir;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, fname), JSON.stringify(report, null, 2));
+    log(`INCIDENT: ${report.id} saved → ${fname}`);
+  } catch(e) { log(`INCIDENT_SAVE_ERR: ${e.message}`); }
+  // Push notification for WARN/CRITICAL
+  if (severity !== 'INFO') {
+    await sendComms(`🚨 ${severity}: ${title} | ${report.id}`, 'incident');
+  }
+  return report;
+}
+
+// ── AI-TO-AI: SELF-ASK ────────────────────────────────────────────────────────
+// Commander autonomously asks AI peers questions and stores answers in memory
+async function autonomousSelfAsk() {
+  const cfg = CONFIG.autonomy;
+  const now = Date.now();
+  if (now - cfg.lastSelfAsk < cfg.selfAskIntervalMs) return;
+  cfg.lastSelfAsk = now;
+
+  // Pick next topic in rotation
+  const topic = cfg.selfAskTopics[cfg.topicIndex % cfg.selfAskTopics.length];
+  cfg.topicIndex++;
+
+  log(`SELF-ASK: "${topic.substring(0,60)}"`);
+
+  // Build enriched prompt with current system context
+  const kpi    = intelUpdateKPI();
+  const ragCtx = intelRagContext(topic, 'aikon_os', 3) + intelRagContext(topic, 'trader', 3);
+  const prompt = `[AIKON-OS Commander Autonomous Query]
+System state: v${CONFIG.version} | Threat:${kpi.threatLevel} | Balance:${kpi.traderBalance??'?'} | Uptime:${kpi.uptime}
+${ragCtx}
+
+Question: ${topic}
+Answer concisely in 3-5 sentences. Focus on actionable insights for Al iKon.`;
+
+  let answer = '';
+  try {
+    const result = await askOllama(prompt, []);
+    answer = result.reply || result;
+  } catch(e) {
+    log(`SELF-ASK OLLAMA_ERR: ${e.message}`);
+    answer = `[Ollama unavailable: ${e.message}]`;
+  }
+
+  // Store in memory + self-ask history
+  const entry = { ts: new Date().toISOString(), topic, answer: answer.substring(0,400) };
+  cfg.selfAskHistory.push(entry);
+  if (cfg.selfAskHistory.length > 100) cfg.selfAskHistory = cfg.selfAskHistory.slice(-100);
+
+  chromaAdd('aikon_os', {
+    insight: `[SELF-ASK] Q: ${topic} | A: ${answer.substring(0,250)}`,
+    source:  'autonomous_self_ask',
+  });
+  intelLogDecision('self_ask', topic, answer.substring(0,100));
+  secAudit('SELF_ASK', `Topic: ${topic.substring(0,60)}`);
+  log(`SELF-ASK ANSWERED: ${answer.substring(0,100)}`);
+
+  // If answer contains actionable signal, queue it
+  const actionWords = ['should','recommend','consider','urgent','immediately','alert','warning','opportunity'];
+  if (actionWords.some(w => answer.toLowerCase().includes(w))) {
+    cfg.decisionQueue.push({ ts: Date.now(), source: 'self_ask', action: answer.substring(0,200) });
+    if (cfg.decisionQueue.length > 50) cfg.decisionQueue.shift();
+  }
+  return entry;
+}
+
+// ── AI-TO-AI: PEER QUERY ──────────────────────────────────────────────────────
+// Query a specific AI peer (Ollama model, Claude API) with a question
+async function queryAIPeer(peerId, question) {
+  const peer = CONFIG.autonomy.aiPeers.find(p => p.id === peerId);
+  if (!peer) return { error: `No peer: ${peerId}` };
+  if (!peer.active) return { error: `Peer ${peerId} not active` };
+
+  try {
+    if (peer.type === 'ollama') {
+      const result = await askOllama(question, [], peer.model !== CONFIG.ollamaModel ? peer.model : null);
+      const answer = result.reply || result;
+      chromaAdd('aikon_os', { insight: `[AI-PEER:${peerId}] Q:${question.substring(0,80)} A:${answer.substring(0,200)}`, source: 'ai_peer' });
+      return { peer: peerId, model: peer.model, answer };
+    }
+    if (peer.type === 'claude') {
+      const claudeKey = process.env.CLAUDE_API_KEY || '';
+      if (!claudeKey) return { error: 'CLAUDE_API_KEY not set' };
+      const payload = {
+        model: peer.model,
+        max_tokens: 400,
+        system: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.`,
+        messages: [{ role: 'user', content: question }],
+      };
+      const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
+        'x-api-key': claudeKey,
+        'anthropic-version': '2023-06-01',
+      });
+      const answer = res?.content?.[0]?.text || JSON.stringify(res).substring(0,200);
+      chromaAdd('aikon_os', { insight: `[AI-PEER:claude] Q:${question.substring(0,80)} A:${answer.substring(0,200)}`, source: 'ai_peer_claude' });
+      return { peer: peerId, model: peer.model, answer };
+    }
+  } catch(e) {
+    return { error: e.message };
+  }
+  return { error: 'Unknown peer type' };
+}
+
+// ── AUTONOMOUS DECISION PROCESSOR ─────────────────────────────────────────────
+// Processes queued autonomous decisions — evaluates and either acts or logs
+async function processDecisionQueue() {
+  if (!CONFIG.autonomy.decisionQueue.length) return;
+  const item = CONFIG.autonomy.decisionQueue.shift();
+  const age  = Date.now() - item.ts;
+  if (age > 3600000) return; // skip stale (>1hr)
+
+  log(`AUTO-DECISION: ${item.action.substring(0,80)}`);
+  intelLogDecision('auto_decision', item.action, 'processed');
+  chromaAdd('opportunities', {
+    insight: `[AUTO] ${item.action.substring(0,250)}`,
+    source:  item.source,
+  });
+}
+
+// ── DAILY SUMMARY REPORT ──────────────────────────────────────────────────────
+async function autonomousDailyReport() {
+  const now   = new Date();
+  const hour  = now.getHours();
+  const today = now.toDateString();
+  const cfg   = CONFIG.autonomy;
+
+  if (hour !== cfg.dailyReportHour) return;
+  if (new Date(cfg.lastDailyReport).toDateString() === today) return;
+  cfg.lastDailyReport = Date.now();
+
+  log('AUTO: generating daily summary report');
+  const kpi  = intelUpdateKPI();
+  const fore = intelForecast();
+  const pats = intelPatternDetect();
+  const sent = CONFIG.intel.sentimentHistory.slice(-5).map(s => s.signal).join(', ') || 'none';
+
+  const summary = [
+    `📊 DAILY SUMMARY — ${today}`,
+    `Commander v${CONFIG.version} | Threat: ${kpi.threatLevel} | Uptime: ${kpi.uptime}`,
+    `Trader Balance: ${kpi.traderBalance != null ? '$'+kpi.traderBalance : 'N/A'} | Win Rate: ${kpi.traderWinRate ?? 'N/A'}`,
+    `Forecast: ${fore.trend} | Avg Δ $${fore.avgDelta ?? '?'}/cycle`,
+    `Sentiment (last 5): ${sent}`,
+    `Top patterns: ${pats.slice(0,5).join(', ')}`,
+    `Memory: ${kpi.memoryEntries} entries | Incidents: ${cfg.incidentCount}`,
+    `Self-ask questions answered: ${cfg.selfAskHistory.length}`,
+    `Decisions queued/processed: ${cfg.decisionQueue.length} pending`,
+  ].join('\n');
+
+  // Push to phone
+  await sendComms(summary, 'daily_report', 'high');
+
+  // Save as incident report (INFO level)
+  await saveIncidentReport('Daily Summary Report', summary, 'INFO');
+
+  // Store in memory
+  chromaAdd('aikon_os', { insight: summary.substring(0,400), source: 'daily_report' });
+  log('AUTO: daily summary sent');
+}
+
+// ── WEEKLY MEMORY SYNTHESIS ───────────────────────────────────────────────────
+async function autonomousWeeklyReport() {
+  const now = new Date();
+  const cfg = CONFIG.autonomy;
+  if (now.getDay() !== cfg.weeklyReportDay) return;
+  const weekStr = `week-${now.getFullYear()}-${now.getMonth()}-${Math.floor(now.getDate()/7)}`;
+  if (cfg.lastWeeklyReport === weekStr) return;
+  cfg.lastWeeklyReport = weekStr;
+
+  log('AUTO: generating weekly synthesis');
+  const synth = await intelCrossBranchSynth().catch(e => `Synthesis error: ${e.message}`);
+  const fore  = intelForecast(20);
+
+  const report = [
+    `📅 WEEKLY SYNTHESIS — ${now.toDateString()}`,
+    `Forecast (20 cycles): ${fore.trend} → $${fore.forecast}`,
+    `Cross-branch insights:`,
+    synth.substring(0, 500),
+  ].join('\n');
+
+  await sendComms(report, 'weekly_report', 'high');
+  await saveIncidentReport('Weekly Synthesis Report', report, 'INFO');
+  log('AUTO: weekly synthesis sent');
+}
+
+// ── THREAT-TRIGGERED ACTIONS ──────────────────────────────────────────────────
+// Runs when threat level changes — chains protocols automatically
+async function autonomousThreatResponse(level) {
+  if (level === 'YELLOW') {
+    await saveIncidentReport('Threat Level Elevated to YELLOW',
+      `Anomaly or lockout detected. Audit log: ${CONFIG.security.anomalyLog.slice(-3).map(e=>e.detail).join(' | ')}`,
+      'WARN');
+    await intelDeepScan().catch(()=>{});
+    intelPatternDetect();
+  }
+  if (level === 'RED') {
+    await saveIncidentReport('THREAT LEVEL RED — Defensive Mode Active',
+      `All external actions require manual /approve. Locked sources: ${[...CONFIG.security.lockedSources].join(', ')||'none'}`,
+      'CRITICAL');
+    await sendComms('🚨 COMMANDER RED ALERT — defensive mode active. Manual approval required for all external actions.', 'threat_response', 'high');
+  }
+  if (level === 'GREEN') {
+    log('AUTO: threat resolved → GREEN, resuming normal operations');
+  }
+}
+
+// ── TRADER DRAWDOWN WATCHER ───────────────────────────────────────────────────
+// Watches for significant drawdown and auto-alerts
+function autonomousDrawdownCheck(balance, prevBalance) {
+  if (!prevBalance || !balance) return;
+  const drawdown = prevBalance - balance;
+  const pct      = (drawdown / prevBalance) * 100;
+  if (pct >= 2) { // 2% drawdown triggers alert
+    const msg = `⚠️ Trader drawdown: -$${drawdown.toFixed(2)} (${pct.toFixed(1)}%) | Balance: $${balance.toFixed(2)}`;
+    sendComms(msg, 'drawdown_alert', 'high');
+    secAudit('DRAWDOWN', msg);
+    if (pct >= 5) {
+      setThreatLevel('YELLOW', `Trader drawdown ${pct.toFixed(1)}%`);
+      saveIncidentReport('Significant Trader Drawdown', msg, 'WARN');
+    }
+  }
+}
+
+// ── MASTER AUTONOMY LOOP ──────────────────────────────────────────────────────
+// The brain of v3.14 — runs every 15 min and self-directs all autonomous tasks
+async function autonomousLoop() {
+  const cfg = CONFIG.autonomy;
+  if (!cfg.enabled) return;
+
+  const now = Date.now();
+  if (now - cfg.lastLoopRun < cfg.loopIntervalMs) return;
+  cfg.lastLoopRun = now;
+  cfg.loopCount++;
+
+  log(`AUTO-LOOP #${cfg.loopCount} starting`);
+  secAudit('AUTO_LOOP', `Loop #${cfg.loopCount}`);
+
+  try {
+    // 1. Update KPI snapshot
+    intelUpdateKPI();
+
+    // 2. Deep intel scan (respects its own 15-min throttle)
+    await intelDeepScan().catch(e => log(`AUTO loop intelScan err: ${e.message}`));
+
+    // 3. Self-directed AI question (hourly)
+    await autonomousSelfAsk().catch(e => log(`AUTO loop selfAsk err: ${e.message}`));
+
+    // 4. Process pending autonomous decisions
+    await processDecisionQueue().catch(()=>{});
+
+    // 5. Security scan
+    secIntegrityCheck();
+    secCheckAnomaly('loop', null);
+
+    // 6. Daily/weekly reports (checks time internally)
+    await autonomousDailyReport().catch(e => log(`AUTO daily err: ${e.message}`));
+    await autonomousWeeklyReport().catch(e => log(`AUTO weekly err: ${e.message}`));
+
+    // 7. Cross-branch synthesis every 4 loops (~1 hr)
+    if (cfg.loopCount % 4 === 0) {
+      await intelCrossBranchSynth().catch(e => log(`AUTO synth err: ${e.message}`));
+    }
+
+    // 8. Market scan every 8 loops (~2 hr)
+    if (cfg.loopCount % 8 === 0) {
+      await intelMarketScan().catch(()=>{});
+    }
+
+    // 9. Peer heartbeat ping
+    await commsPingPeers().catch(()=>{});
+
+    // 10. Flush message queue
+    await commsFlushQueue().catch(()=>{});
+
+    log(`AUTO-LOOP #${cfg.loopCount} complete`);
+  } catch(e) {
+    log(`AUTO-LOOP ERR: ${e.message}`);
+    secAudit('AUTO_LOOP_ERR', e.message);
+  }
 }
 
 // ─── APPROVAL QUEUE ───────────────────────────────────────────────────────────
@@ -1021,6 +1362,13 @@ async function learnFromTrader() {
     const insight = `Trader: balance=$${s.balance?.toFixed(2)}, winRate=${winRate}%, status=${status}, price=$${s.currentPrice?.toFixed(1)}, openTrades=${openCount} [${openSummary}], dailyPL=$${s.dailyPL?.toFixed(2)??'N/A'}`;
     chromaAdd('trader', { insight, source: 'trader_api' });
     log(`LEARN: trader snapshot logged — ${insight.substring(0,80)}`);
+
+    // AUTO: drawdown detection — compare to previous KPI balance
+    const prevBalance = CONFIG.intel.kpiSnapshot?.traderBalance;
+    if (prevBalance && s.balance) autonomousDrawdownCheck(s.balance, prevBalance);
+
+    // AUTO: run sentiment on trade summary
+    intelSentiment(insight);
   } catch(e) { log(`LEARN_ERR trader: ${e.message}`); }
 }
 
@@ -2283,6 +2631,9 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /chroma [branch]     — 📚 Same as /memory
   /opportunities       — 💡 Opportunity scan + history
   /scout               — 💡 Same as /opportunities
+  /auto [status|run|ask|daily|history|decisions|on|off] — 🤖 Autonomy engine
+  /auto peer [on|off|ask] <id>  — Query/toggle AI peer (ollama-local, deepseek-local, claude-api)
+  /auto report <title>          — Save manual incident report
   /security [status|audit|threats|scan|lockout|green|yellow|red] — 🔒 Security protocols
   /intel [kpi|scan|feeds|sentiment|patterns|forecast|synth|decisions|market] — 🧠 Intelligence
   /comms [status|broadcast|webhook|slack|discord|queue|flush|peers|log] — 📡 Communications
@@ -2493,6 +2844,90 @@ SETUP (one-time):
       break;
     }
 
+    // ── AUTO COMMAND ──────────────────────────────────────────────────────────
+    case '/auto': {
+      const sub = args || 'status';
+      const cfg = CONFIG.autonomy;
+      if (sub === 'status') {
+        print(`\n🤖 AUTONOMY ENGINE v${CONFIG.version}`);
+        print(`  Enabled:        ${cfg.enabled ? '✅ YES' : '❌ NO'}`);
+        print(`  Loop count:     ${cfg.loopCount}`);
+        print(`  Last loop:      ${cfg.lastLoopRun ? new Date(cfg.lastLoopRun).toLocaleTimeString() : 'never'}`);
+        print(`  Self-asks done: ${cfg.selfAskHistory.length}`);
+        print(`  Last self-ask:  ${cfg.lastSelfAsk ? new Date(cfg.lastSelfAsk).toLocaleTimeString() : 'never'}`);
+        print(`  Decision queue: ${cfg.decisionQueue.length} pending`);
+        print(`  Incidents:      ${cfg.incidentCount}`);
+        print(`  Daily report:   ${cfg.lastDailyReport ? new Date(cfg.lastDailyReport).toLocaleDateString() : 'never'} (at ${cfg.dailyReportHour}:00)`);
+        print(`  Report dir:     ${cfg.reportDir}`);
+        print(`\n  AI PEERS:`);
+        cfg.aiPeers.forEach(p => print(`    ${p.id}: ${p.type}/${p.model} [${p.active ? 'ACTIVE' : 'inactive'}]`));
+        print(`\n  SELF-ASK TOPICS (${cfg.selfAskTopics.length} total, next: #${cfg.topicIndex % cfg.selfAskTopics.length}):`);
+        cfg.selfAskTopics.slice(0,3).forEach((t,i) => print(`    ${i+1}. ${t}`));
+      } else if (sub === 'run') {
+        print('🤖 Running autonomy loop now...');
+        CONFIG.autonomy.lastLoopRun = 0; // force run
+        await autonomousLoop();
+        print('✅ Autonomy loop complete.');
+      } else if (sub === 'ask') {
+        print('🤖 Running self-ask now...');
+        CONFIG.autonomy.lastSelfAsk = 0; // force run
+        const r = await autonomousSelfAsk();
+        if (r) {
+          print(`\n❓ Question: ${r.topic}`);
+          print(`💡 Answer:   ${r.answer}`);
+        }
+      } else if (sub === 'daily') {
+        print('📊 Generating daily report now...');
+        CONFIG.autonomy.lastDailyReport = 0;
+        const hour = CONFIG.autonomy.dailyReportHour;
+        CONFIG.autonomy.dailyReportHour = new Date().getHours(); // force hour match
+        await autonomousDailyReport();
+        CONFIG.autonomy.dailyReportHour = hour;
+        print('✅ Daily report sent.');
+      } else if (sub === 'history') {
+        const hist = cfg.selfAskHistory.slice(-5);
+        if (!hist.length) { print('No self-ask history yet.'); break; }
+        print('\n📚 SELF-ASK HISTORY (last 5):');
+        hist.forEach((h,i) => {
+          print(`\n  [${i+1}] ${h.ts}`);
+          print(`  Q: ${h.topic}`);
+          print(`  A: ${h.answer.substring(0,150)}...`);
+        });
+      } else if (sub === 'decisions') {
+        if (!cfg.decisionQueue.length) { print('No pending autonomous decisions.'); break; }
+        print(`\n⚡ PENDING DECISIONS (${cfg.decisionQueue.length}):`);
+        cfg.decisionQueue.slice(-5).forEach((d,i) => print(`  ${i+1}. [${d.source}] ${d.action.substring(0,100)}`));
+      } else if (sub === 'on') {
+        cfg.enabled = true;
+        print('✅ Autonomy engine ENABLED.');
+        secAudit('AUTONOMY', 'Engine enabled by operator');
+      } else if (sub === 'off') {
+        cfg.enabled = false;
+        print('⚠️ Autonomy engine DISABLED.');
+        secAudit('AUTONOMY', 'Engine disabled by operator');
+      } else if (sub.startsWith('peer ')) {
+        const parts = sub.replace('peer ','').split(' ');
+        const [action, peerId] = parts;
+        const peer = cfg.aiPeers.find(p => p.id === peerId);
+        if (!peer) { print(`Unknown peer: ${peerId}. Peers: ${cfg.aiPeers.map(p=>p.id).join(', ')}`); break; }
+        if (action === 'on')  { peer.active = true;  print(`✅ Peer ${peerId} activated.`); }
+        if (action === 'off') { peer.active = false; print(`⚠️ Peer ${peerId} deactivated.`); }
+        if (action === 'ask') {
+          const q = parts.slice(2).join(' ') || cfg.selfAskTopics[0];
+          print(`📡 Querying ${peerId}...`);
+          const r = await queryAIPeer(peerId, q);
+          r.error ? print(`❌ ${r.error}`) : print(`\n💡 [${r.peer}/${r.model}]: ${r.answer}`);
+        }
+      } else if (sub.startsWith('report ')) {
+        const title = sub.replace('report ','');
+        await saveIncidentReport(title, `Manual report created by operator at ${new Date().toISOString()}`, 'INFO');
+        print(`✅ Incident report saved to ${cfg.reportDir}`);
+      } else {
+        print('Usage: /auto [status|run|ask|daily|history|decisions|on|off|peer <on|off|ask> <id>|report <title>]');
+      }
+      break;
+    }
+
     default:
       print(`Unknown command: ${cmd}. Type /help`);
   }
@@ -2510,10 +2945,10 @@ function printBanner() {
 ║  Brain:    Railway 24/7 relay (all businesses)            ║
 ║  Teams:    Trader | Biz | Research | Roblox               ║
 ╠══════════════════════════════════════════════════════════╣
-║  PROTOCOLS: 🔒 Security(S01-10) · 🧠 Intel(I01-10) ·    ║
-║             📡 Comms(C01-10)  — 30 active protocols       ║
+║  PROTOCOLS: 🔒 Security · 🧠 Intel · 📡 Comms · 🤖 Auto  ║
+║             30 protocols + Full Autonomy Engine active     ║
 ╠══════════════════════════════════════════════════════════╣
-║  /security  |  /intel  |  /comms  |  /update  |  /help   ║
+║  /auto  |  /security  |  /intel  |  /comms  |  /help      ║
 ╚══════════════════════════════════════════════════════════╝
 `);
 }
@@ -2647,7 +3082,7 @@ async function main() {
   setTimeout(() => { secIntegrityCheck(); secAudit('STARTUP', `Commander v${CONFIG.version} online`); }, 3000);
   // S-04: Key rotation check every hour
   setInterval(secKeyRotationCheck, 3600000);
-  // I-01: Deep intel scan every 15 min
+  // I-01: Deep intel scan every 15 min (also called by autonomy loop)
   setInterval(intelDeepScan, CONFIG.intel.scanInterval);
   // I-03: Feed ingestion every 30 min
   setInterval(intelFeedIngestion, 1800000);
@@ -2658,6 +3093,20 @@ async function main() {
   // I-07: KPI snapshot every 5 min
   setInterval(intelUpdateKPI, 300000);
   log('PROTOCOLS: Security/Intel/Comms engines started');
+
+  // ── AUTONOMY ENGINE v3.14 ─────────────────────────────────────────────────
+  // Master loop — self-directs all autonomous tasks every 15 min
+  setInterval(autonomousLoop, CONFIG.autonomy.loopIntervalMs);
+  // Self-ask — Commander asks AI peers questions every hour
+  setInterval(autonomousSelfAsk, CONFIG.autonomy.selfAskIntervalMs);
+  // Threat chaining — patch setThreatLevel to auto-trigger response
+  const _baseThreatLevel = setThreatLevel;
+  global._threatChainHooked = true;
+  // Run first loop after 60s (let system settle)
+  setTimeout(() => autonomousLoop(), 60000);
+  // Run first self-ask after 90s
+  setTimeout(() => autonomousSelfAsk(), 90000);
+  log('AUTONOMY: v3.14 engine started — self-directed AI learning active');
 
   // Health + HUD WebSocket server + Phone relay
   const healthPort = process.env.COMMANDER_PORT || 3000;
