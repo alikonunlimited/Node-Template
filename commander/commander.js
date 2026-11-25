@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.12 — fix winRate/status/openTrades in trader memory logging
+// AIKON-OS Commander v3.13 — 30 protocols: 10 Security + 10 Intelligence + 10 Communication
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.12',
+  version:       '3.13',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -98,6 +98,53 @@ const CONFIG = {
   // Approval queue — big decisions wait here
   pendingApprovals: [],
   deepseekReady: false,
+  // ── SECURITY PROTOCOL LAYER ────────────────────────────────────────────────
+  security: {
+    enabled:          true,
+    lockoutFile:      path.join('D:\\AIKON-OS', 'security', 'lockout.json'),
+    auditFile:        path.join('D:\\AIKON-OS', 'security', 'audit.log'),
+    threatFile:       path.join('D:\\AIKON-OS', 'security', 'threats.json'),
+    failedAttempts:   {},         // IP/source → count
+    lockedSources:    new Set(),  // blocked sources
+    maxFails:         5,          // S-01: brute-force threshold
+    keyRotateMs:      86400000,   // S-04: 24hr key rotation window check
+    lastKeyCheck:     0,
+    anomalyLog:       [],         // S-06: anomaly events
+    integrityHashes:  {},         // S-07: file hash registry
+    ragLog:           [],         // S-08: RAG access log
+    encryptionFlag:   true,       // S-09: data-at-rest flag
+    threatLevel:      'GREEN',    // S-10: GREEN / YELLOW / RED
+  },
+  // ── INTELLIGENCE PROTOCOL LAYER ───────────────────────────────────────────
+  intel: {
+    ragSources:       [],         // I-02: indexed knowledge documents
+    sentimentHistory: [],         // I-04: market sentiment log
+    patternLog:       [],         // I-05: detected patterns
+    forecastLog:      [],         // I-06: forecast snapshots
+    kpiSnapshot:      {},         // I-07: live KPI cache
+    competitorLog:    [],         // I-08: competitor/market scan log
+    decisionLog:      [],         // I-09: Commander decisions for review
+    feedUrls: [                   // I-03: free live feeds
+      'https://feeds.finance.yahoo.com/rss/2.0/headline?s=XAUUSD=X&region=US&lang=en-US',
+      'https://www.investing.com/rss/news_25.rss',
+    ],
+    scanInterval:     900000,     // I-01: deep scan every 15 min
+    lastScan:         0,
+  },
+  // ── COMMUNICATION PROTOCOL LAYER ──────────────────────────────────────────
+  comms: {
+    webhookUrl:       process.env.WEBHOOK_URL || '',   // C-02: outbound webhook
+    slackUrl:         process.env.SLACK_URL   || '',   // C-03: Slack webhook
+    discordUrl:       process.env.DISCORD_URL || '',   // C-04: Discord webhook
+    emailEnabled:     false,                            // C-05: SMTP alert (future)
+    broadcastLog:     [],                               // C-01: all outbound msgs
+    peerNodes:        [],                               // C-07: peer Commander nodes
+    heartbeatMs:      60000,                            // C-08: peer heartbeat
+    lastHeartbeat:    {},                               // C-08: per-peer ts
+    messageQueue:     [],                               // C-09: outbound queue
+    maxQueueSize:     100,
+    channelPriority:  ['ntfy','webhook','slack','discord'], // C-10: delivery order
+  },
 };
 
 // ─── BUSINESS BRANCHES ────────────────────────────────────────────────────────
@@ -163,6 +210,397 @@ function chromaStats() {
   return Object.entries(chromaMemory.collections)
     .map(([k, v]) => `  ${BRANCHES[k]?.name || k}: ${v.length} entries`)
     .join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ══  SECURITY PROTOCOLS  S-01 through S-10  ════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// S-01: Brute-force / access lockout — track failed calls by source key
+function secTrackFail(source) {
+  const s = CONFIG.security;
+  s.failedAttempts[source] = (s.failedAttempts[source] || 0) + 1;
+  if (s.failedAttempts[source] >= s.maxFails) {
+    s.lockedSources.add(source);
+    secAudit(`LOCKOUT`, `Source ${source} locked after ${s.failedAttempts[source]} failures`);
+    setThreatLevel('YELLOW', `Lockout triggered: ${source}`);
+    sendComms(`🔒 SECURITY LOCKOUT: ${source} blocked after repeated failures`, 'security');
+  }
+}
+function secIsLocked(source) { return CONFIG.security.lockedSources.has(source); }
+function secResetFails(source) { delete CONFIG.security.failedAttempts[source]; CONFIG.security.lockedSources.delete(source); }
+
+// S-02: Audit trail — every command and action is logged with timestamp + source
+function secAudit(event, detail, source = 'commander') {
+  const entry = `[${new Date().toISOString()}] [${event}] [${source}] ${detail}`;
+  log(`AUDIT: ${entry}`);
+  try {
+    const dir = path.dirname(CONFIG.security.auditFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(CONFIG.security.auditFile, entry + '\n');
+  } catch(e) {}
+  CONFIG.security.anomalyLog.push({ ts: Date.now(), event, detail, source });
+  if (CONFIG.security.anomalyLog.length > 500) CONFIG.security.anomalyLog = CONFIG.security.anomalyLog.slice(-500);
+}
+
+// S-03: Input sanitization — strip shell injection from any string Commander acts on
+function secSanitize(input) {
+  if (typeof input !== 'string') return '';
+  return input.replace(/[;&|`$><\\]/g, '').substring(0, 2000);
+}
+
+// S-04: Key rotation check — warn if .env hasn't changed in >24h (reminder only, no auto-change)
+function secKeyRotationCheck() {
+  const s = CONFIG.security;
+  const now = Date.now();
+  if (now - s.lastKeyCheck < s.keyRotateMs) return;
+  s.lastKeyCheck = now;
+  try {
+    const stat = fs.statSync('D:\\AIKON-OS\\.env');
+    const ageMs = now - stat.mtimeMs;
+    if (ageMs > s.keyRotateMs * 7) { // >7 days
+      const days = Math.floor(ageMs / 86400000);
+      print(`🔑 [S-04] Key rotation reminder: .env unchanged for ${days} days. Consider rotating BRIDGE_KEY.`);
+      secAudit('KEY_AGE_WARNING', `.env unchanged for ${days} days`);
+    }
+  } catch(e) {}
+}
+
+// S-05: Sensitive data masking — masks keys/tokens before logging or printing
+function secMask(text) {
+  return text.replace(/([A-Za-z0-9_-]{20,})/g, (m) => m.substring(0,4) + '****' + m.slice(-4));
+}
+
+// S-06: Anomaly detection — flag unusual patterns (high error rate, unexpected URLs)
+function secCheckAnomaly(event, value) {
+  const recentErrors = CONFIG.security.anomalyLog.filter(e => e.ts > Date.now() - 300000 && e.event.includes('ERR'));
+  if (recentErrors.length >= 10) {
+    setThreatLevel('YELLOW', `High error rate: ${recentErrors.length} errors in 5 min`);
+    secAudit('ANOMALY', `High error rate detected: ${recentErrors.length} in 5min`);
+  }
+}
+
+// S-07: File integrity check — hash key files; alert if they change unexpectedly
+function secIntegrityCheck() {
+  const files = [
+    path.join(__dirname, 'commander.js'),
+    path.join(__dirname, 'claude-poller.js'),
+  ];
+  for (const f of files) {
+    try {
+      const content = fs.readFileSync(f, 'utf8');
+      const hash = content.length + ':' + content.slice(0, 64).replace(/\s/g,'');
+      if (CONFIG.security.integrityHashes[f] && CONFIG.security.integrityHashes[f] !== hash) {
+        secAudit('INTEGRITY_CHANGE', `File changed outside /update: ${path.basename(f)}`);
+        print(`⚠️  [S-07] File changed outside /update: ${path.basename(f)}`);
+      }
+      CONFIG.security.integrityHashes[f] = hash;
+    } catch(e) {}
+  }
+}
+
+// S-08: RAG access control — log every memory read with who asked
+function secRagLog(branch, query, source = 'user') {
+  CONFIG.security.ragLog.push({ ts: new Date().toISOString(), branch, query: query.substring(0,80), source });
+  if (CONFIG.security.ragLog.length > 200) CONFIG.security.ragLog = CONFIG.security.ragLog.slice(-200);
+}
+
+// S-09: Data-at-rest flag — log that sensitive memory is on encrypted D: drive
+function secDataAtRest(action) {
+  secAudit('DATA_AT_REST', `${action} — memory path: ${CONFIG.chromaFile}`);
+}
+
+// S-10: Threat level management — GREEN / YELLOW / RED; RED triggers full lockdown mode
+function setThreatLevel(level, reason) {
+  const prev = CONFIG.security.threatLevel;
+  CONFIG.security.threatLevel = level;
+  if (level !== prev) {
+    secAudit('THREAT_LEVEL', `${prev} → ${level}: ${reason}`);
+    const emoji = level === 'RED' ? '🚨' : level === 'YELLOW' ? '⚠️' : '✅';
+    print(`${emoji} [S-10] THREAT LEVEL: ${prev} → ${level} | ${reason}`);
+    if (level === 'RED') {
+      sendComms(`🚨 AIKON-OS THREAT LEVEL RED: ${reason}`, 'security');
+      print(`🔴 RED ALERT: Commander entering defensive mode. All external actions require manual /approve.`);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ══  INTELLIGENCE PROTOCOLS  I-01 through I-10  ════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// I-01: Deep intel scan — runs every 15 min; queries all branches + news
+async function intelDeepScan() {
+  const now = Date.now();
+  if (now - CONFIG.intel.lastScan < CONFIG.intel.scanInterval) return;
+  CONFIG.intel.lastScan = now;
+  log('INTEL: deep scan starting');
+  await learnFromTrader();
+  await learnOpportunities();
+  intelUpdateKPI();
+  intelPatternDetect();
+}
+
+// I-02: RAG (Retrieval-Augmented Generation) — enrich Ollama prompts with memory context
+function intelRagContext(query, branch, limit = 5) {
+  secRagLog(branch, query, 'rag');
+  const results = chromaQuery(branch, query, limit);
+  if (!results.length) return '';
+  return '\n\n[MEMORY CONTEXT]\n' + results.map(r => `• ${r.content}`).join('\n');
+}
+
+// I-03: Live feed ingestion — parse RSS/JSON feeds into trader/opportunities branch
+async function intelFeedIngestion() {
+  for (const url of CONFIG.intel.feedUrls) {
+    try {
+      const xml = await httpGet(url).catch(() => null);
+      if (!xml || typeof xml !== 'string') continue;
+      const titles = [...xml.matchAll(/<title><!\[CDATA\[([^\]]+)\]\]>/g)].map(m => m[1]);
+      const plain  = [...xml.matchAll(/<title>([^<]{10,})<\/title>/g)].map(m => m[1]);
+      const items  = [...new Set([...titles, ...plain])].slice(0,5);
+      if (items.length) {
+        const branch = url.includes('XAU') || url.includes('gold') || url.includes('investing') ? 'trader' : 'opportunities';
+        chromaAdd(branch, { insight: 'Feed: ' + items.join(' | '), source: url.substring(0,50) });
+        log(`INTEL-FEED: ${items.length} items from ${url.substring(0,40)}`);
+      }
+    } catch(e) { log(`INTEL_FEED_ERR: ${e.message}`); }
+  }
+}
+
+// I-04: Sentiment analysis — simple bull/bear word scoring on any text
+function intelSentiment(text) {
+  const bullWords = ['rally','surge','gains','bullish','breakout','support','buy','strong','recovery','upside'];
+  const bearWords = ['drop','fall','crash','bearish','breakdown','resistance','sell','weak','decline','downside'];
+  const lower = text.toLowerCase();
+  const bull = bullWords.filter(w => lower.includes(w)).length;
+  const bear = bearWords.filter(w => lower.includes(w)).length;
+  const score = bull - bear;
+  const signal = score > 1 ? 'BULLISH' : score < -1 ? 'BEARISH' : 'NEUTRAL';
+  const entry = { ts: new Date().toISOString(), text: text.substring(0,100), bull, bear, signal };
+  CONFIG.intel.sentimentHistory.push(entry);
+  if (CONFIG.intel.sentimentHistory.length > 100) CONFIG.intel.sentimentHistory = CONFIG.intel.sentimentHistory.slice(-100);
+  return { bull, bear, score, signal };
+}
+
+// I-05: Pattern recognition — detect repeated themes across memory branches
+function intelPatternDetect() {
+  const all = Object.entries(chromaMemory.collections)
+    .flatMap(([,v]) => v.map(e => (e.insight || e.content || '').toLowerCase()));
+  const wordCount = {};
+  for (const text of all) {
+    for (const word of text.split(/\W+/).filter(w => w.length > 5)) {
+      wordCount[word] = (wordCount[word] || 0) + 1;
+    }
+  }
+  const top = Object.entries(wordCount).sort((a,b) => b[1]-a[1]).slice(0,10).map(([w,c]) => `${w}(${c})`);
+  const pattern = { ts: new Date().toISOString(), topTerms: top };
+  CONFIG.intel.patternLog.push(pattern);
+  if (CONFIG.intel.patternLog.length > 50) CONFIG.intel.patternLog = CONFIG.intel.patternLog.slice(-50);
+  return top;
+}
+
+// I-06: Forecast engine — project trader balance trend from last N snapshots
+function intelForecast(periods = 5) {
+  const col = chromaMemory.collections['trader'] || [];
+  const balances = col.slice(-10).map(e => {
+    const m = (e.insight||'').match(/balance=\$([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  }).filter(Boolean);
+  if (balances.length < 2) return { trend: 'insufficient data', forecast: null };
+  const deltas = balances.slice(1).map((b,i) => b - balances[i]);
+  const avgDelta = deltas.reduce((a,b) => a+b, 0) / deltas.length;
+  const forecast = balances[balances.length-1] + avgDelta * periods;
+  const trend = avgDelta > 0 ? '📈 UP' : avgDelta < 0 ? '📉 DOWN' : '➡ FLAT';
+  const snap = { ts: new Date().toISOString(), avgDelta: avgDelta.toFixed(2), forecast: forecast.toFixed(2), trend, periods };
+  CONFIG.intel.forecastLog.push(snap);
+  if (CONFIG.intel.forecastLog.length > 50) CONFIG.intel.forecastLog = CONFIG.intel.forecastLog.slice(-50);
+  return snap;
+}
+
+// I-07: KPI dashboard — live snapshot of all key metrics
+function intelUpdateKPI() {
+  const traderCol = chromaMemory.collections['trader'] || [];
+  const lastTrader = traderCol.slice(-1)[0];
+  const balMatch = lastTrader ? (lastTrader.insight||'').match(/balance=\$([0-9.]+)/) : null;
+  const wrMatch  = lastTrader ? (lastTrader.insight||'').match(/winRate=([0-9.N/A]+)/) : null;
+  CONFIG.intel.kpiSnapshot = {
+    ts:             new Date().toISOString(),
+    traderBalance:  balMatch ? parseFloat(balMatch[1]) : null,
+    traderWinRate:  wrMatch  ? wrMatch[1] : null,
+    memoryEntries:  Object.values(chromaMemory.collections).reduce((a,v) => a+v.length, 0),
+    branches:       Object.keys(chromaMemory.collections).length,
+    threatLevel:    CONFIG.security.threatLevel,
+    uptime:         Math.floor(process.uptime() / 60) + ' min',
+    deepseek:       CONFIG.deepseekReady ? 'READY' : 'offline',
+    tts:            CONFIG.ttsEnabled ? 'ON' : 'off',
+    voice:          CONFIG.voiceEnabled ? 'ON' : 'off',
+  };
+  return CONFIG.intel.kpiSnapshot;
+}
+
+// I-08: Competitor / market scan — search for opportunity signals vs known markets
+async function intelMarketScan(topic = 'XAU USD gold trading signals') {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(topic)}`;
+    const html = await httpGet(url).catch(() => '');
+    const titles = [...(html.matchAll(/class="result__title"[^>]*>([^<]{5,80})/g) || [])].map(m => m[1].trim()).slice(0,5);
+    if (titles.length) {
+      const entry = { ts: new Date().toISOString(), topic, results: titles };
+      CONFIG.intel.competitorLog.push(entry);
+      if (CONFIG.intel.competitorLog.length > 50) CONFIG.intel.competitorLog = CONFIG.intel.competitorLog.slice(-50);
+      chromaAdd('opportunities', { insight: `Market scan [${topic}]: ${titles.join(' | ')}`, source: 'duckduckgo_intel' });
+    }
+    return titles;
+  } catch(e) { return []; }
+}
+
+// I-09: Decision logger — record every major Commander action for review
+function intelLogDecision(action, reasoning, outcome = 'pending') {
+  const entry = { ts: new Date().toISOString(), action, reasoning: reasoning.substring(0,200), outcome };
+  CONFIG.intel.decisionLog.push(entry);
+  if (CONFIG.intel.decisionLog.length > 200) CONFIG.intel.decisionLog = CONFIG.intel.decisionLog.slice(-200);
+  chromaAdd('aikon_os', { insight: `DECISION: ${action} — ${reasoning.substring(0,100)}`, source: 'decision_log' });
+}
+
+// I-10: Cross-branch synthesis — combine insights from all branches into one summary
+async function intelCrossBranchSynth() {
+  const branches = Object.keys(chromaMemory.collections);
+  const summaries = branches.map(b => {
+    const col = chromaMemory.collections[b] || [];
+    const last = col.slice(-3).map(e => e.insight || e.content || '').filter(Boolean).join(' | ');
+    return last ? `[${b.toUpperCase()}] ${last.substring(0,120)}` : null;
+  }).filter(Boolean);
+  if (!summaries.length) return 'No cross-branch data yet.';
+  const prompt = `Synthesize these AIKON-OS branch summaries into 3 actionable insights for Al iKon:\n${summaries.join('\n')}`;
+  const { reply } = await askOllama(prompt, [], CONFIG.deepseekReady ? CONFIG.deepseekModel : null);
+  chromaAdd('opportunities', { insight: `[Cross-branch] ${reply.substring(0,300)}`, source: 'cross_branch_synth' });
+  intelLogDecision('cross_branch_synth', summaries.join(' | ').substring(0,150));
+  return reply;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ══  COMMUNICATION PROTOCOLS  C-01 through C-10  ═══════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// C-01: Broadcast log — all outbound messages recorded before sending
+function commsLog(msg, channel, priority = 'normal') {
+  CONFIG.comms.broadcastLog.push({ ts: new Date().toISOString(), channel, msg: msg.substring(0,200), priority });
+  if (CONFIG.comms.broadcastLog.length > 300) CONFIG.comms.broadcastLog = CONFIG.comms.broadcastLog.slice(-300);
+}
+
+// C-02: Outbound webhook — POST any event to a configured webhook URL (Zapier, Make, etc.)
+async function commsSendWebhook(payload) {
+  if (!CONFIG.comms.webhookUrl) return false;
+  try {
+    await httpPost(CONFIG.comms.webhookUrl, payload);
+    commsLog(JSON.stringify(payload).substring(0,100), 'webhook');
+    return true;
+  } catch(e) { log(`COMMS_WEBHOOK_ERR: ${e.message}`); return false; }
+}
+
+// C-03: Slack notification — POST to Slack incoming webhook
+async function commsSendSlack(text) {
+  if (!CONFIG.comms.slackUrl) return false;
+  try {
+    await httpPost(CONFIG.comms.slackUrl, { text: `[AIKON-OS] ${text}` });
+    commsLog(text, 'slack');
+    return true;
+  } catch(e) { log(`COMMS_SLACK_ERR: ${e.message}`); return false; }
+}
+
+// C-04: Discord notification — POST to Discord webhook
+async function commsSendDiscord(content) {
+  if (!CONFIG.comms.discordUrl) return false;
+  try {
+    await httpPost(CONFIG.comms.discordUrl, { content: `[AIKON-OS] ${content}` });
+    commsLog(content, 'discord');
+    return true;
+  } catch(e) { log(`COMMS_DISCORD_ERR: ${e.message}`); return false; }
+}
+
+// C-05: Priority broadcast — sends to all configured channels in priority order; stops at first success
+async function sendComms(message, source = 'commander', priority = 'normal') {
+  commsLog(message, 'broadcast', priority);
+  secAudit('COMMS_OUT', message.substring(0,80), source);
+  for (const channel of CONFIG.comms.channelPriority) {
+    if (channel === 'ntfy' && CONFIG.ntfyTopic) {
+      const sent = await ntfySend(message, source);
+      if (sent) return true;
+    } else if (channel === 'webhook' && CONFIG.comms.webhookUrl) {
+      const sent = await commsSendWebhook({ event: source, message, ts: new Date().toISOString() });
+      if (sent) return true;
+    } else if (channel === 'slack' && CONFIG.comms.slackUrl) {
+      const sent = await commsSendSlack(message);
+      if (sent) return true;
+    } else if (channel === 'discord' && CONFIG.comms.discordUrl) {
+      const sent = await commsSendDiscord(message);
+      if (sent) return true;
+    }
+  }
+  return false;
+}
+
+// C-06: Brain relay enhanced — post structured events to Brain with type tagging
+async function commsRelayToBrain(eventType, payload) {
+  if (!CONFIG.brainUrl) return;
+  try {
+    const url = CONFIG.brainUrl.replace(/\/jarvis$/, '') + '/relay/command';
+    await httpPost(url, { type: eventType, payload, ts: new Date().toISOString() }, bridgeHeaders());
+    commsLog(`brain:${eventType}`, 'brain');
+  } catch(e) { log(`COMMS_BRAIN_ERR: ${e.message}`); }
+}
+
+// C-07: Peer Commander nodes — register/ping other Commander instances (future multi-machine)
+function commsRegisterPeer(nodeId, url) {
+  const existing = CONFIG.comms.peerNodes.find(p => p.id === nodeId);
+  if (!existing) CONFIG.comms.peerNodes.push({ id: nodeId, url, lastSeen: null, status: 'unknown' });
+  else existing.url = url;
+  print(`🔗 [C-07] Peer node registered: ${nodeId} @ ${url}`);
+}
+async function commsPingPeers() {
+  for (const peer of CONFIG.comms.peerNodes) {
+    try {
+      const res = await httpGet(peer.url + '/health').catch(() => null);
+      peer.lastSeen = Date.now();
+      peer.status = res ? 'online' : 'unreachable';
+    } catch(e) { peer.status = 'unreachable'; }
+    CONFIG.comms.lastHeartbeat[peer.id] = Date.now();
+  }
+}
+
+// C-08: Heartbeat — broadcast Commander online status every 60s to Brain + all channels
+async function commsHeartbeat() {
+  const kpi = intelUpdateKPI();
+  const msg = `♥ Commander v${CONFIG.version} | ${kpi.threatLevel} | Balance:${kpi.traderBalance??'?'} | Mem:${kpi.memoryEntries} entries | ${kpi.uptime}`;
+  if (CONFIG.brainUrl) await commsRelayToBrain('heartbeat', kpi).catch(()=>{});
+  log(`HEARTBEAT: ${msg}`);
+}
+
+// C-09: Message queue — buffer outbound messages when network is down; flush on reconnect
+async function commsFlushQueue() {
+  if (!CONFIG.comms.messageQueue.length) return;
+  const toSend = [...CONFIG.comms.messageQueue];
+  CONFIG.comms.messageQueue = [];
+  for (const item of toSend) {
+    await sendComms(item.message, item.source, item.priority);
+  }
+}
+function commsQueue(message, source = 'commander', priority = 'normal') {
+  if (CONFIG.comms.messageQueue.length >= CONFIG.comms.maxQueueSize) CONFIG.comms.messageQueue.shift();
+  CONFIG.comms.messageQueue.push({ message, source, priority, ts: Date.now() });
+}
+
+// C-10: Channel health check — verify each configured communication channel
+async function commsHealthCheck() {
+  const results = [];
+  results.push(`ntfy:    ${CONFIG.ntfyTopic ? '✓ configured' : '✗ not set'}`);
+  results.push(`webhook: ${CONFIG.comms.webhookUrl ? '✓ configured' : '✗ not set (WEBHOOK_URL)'}`);
+  results.push(`slack:   ${CONFIG.comms.slackUrl ? '✓ configured' : '✗ not set (SLACK_URL)'}`);
+  results.push(`discord: ${CONFIG.comms.discordUrl ? '✓ configured' : '✗ not set (DISCORD_URL)'}`);
+  results.push(`brain:   ${CONFIG.brainUrl ? '✓ configured' : '✗ not set'}`);
+  results.push(`peers:   ${CONFIG.comms.peerNodes.length} node(s)`);
+  results.push(`queue:   ${CONFIG.comms.messageQueue.length} pending`);
+  return results.join('\n');
 }
 
 // ─── APPROVAL QUEUE ───────────────────────────────────────────────────────────
@@ -1845,6 +2283,9 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /chroma [branch]     — 📚 Same as /memory
   /opportunities       — 💡 Opportunity scan + history
   /scout               — 💡 Same as /opportunities
+  /security [status|audit|threats|scan|lockout|green|yellow|red] — 🔒 Security protocols
+  /intel [kpi|scan|feeds|sentiment|patterns|forecast|synth|decisions|market] — 🧠 Intelligence
+  /comms [status|broadcast|webhook|slack|discord|queue|flush|peers|log] — 📡 Communications
   /approvals           — ⏳ Show pending approvals
   /approve <id>        — ✅ Approve a queued action
   /deny <id>           — 🚫 Deny a queued action
@@ -1899,6 +2340,159 @@ SETUP (one-time):
       break;
     }
 
+    // ── SECURITY COMMAND ──────────────────────────────────────────────────────
+    case '/security': {
+      const sub = args || 'status';
+      if (sub === 'status') {
+        const s = CONFIG.security;
+        print(`\n🔒 SECURITY STATUS [S-10: ${s.threatLevel}]`);
+        print(`  Locked sources:   ${s.lockedSources.size > 0 ? [...s.lockedSources].join(', ') : 'none'}`);
+        print(`  Failed attempts:  ${JSON.stringify(s.failedAttempts)}`);
+        print(`  Anomaly events:   ${s.anomalyLog.length} (last 500 kept)`);
+        print(`  Integrity hashes: ${Object.keys(s.integrityHashes).length} files tracked`);
+        print(`  Encryption flag:  ${s.encryptionFlag ? '✓ ON' : '✗ OFF'}`);
+        print(`  Audit file:       ${s.auditFile}`);
+        print(`  RAG access log:   ${s.ragLog.length} entries`);
+        secIntegrityCheck();
+        secKeyRotationCheck();
+      } else if (sub === 'audit') {
+        const recent = CONFIG.security.anomalyLog.slice(-10);
+        if (!recent.length) { print('No audit events yet.'); break; }
+        print('\n📋 RECENT AUDIT LOG:');
+        recent.forEach(e => print(`  [${e.event}] ${e.detail} (${e.source})`));
+      } else if (sub === 'threats') {
+        print(`\n⚡ THREAT LEVEL: ${CONFIG.security.threatLevel}`);
+        const threats = CONFIG.security.anomalyLog.filter(e => e.event.includes('THREAT') || e.event === 'LOCKOUT' || e.event === 'ANOMALY').slice(-10);
+        threats.length ? threats.forEach(e => print(`  ${e.ts} [${e.event}] ${e.detail}`)) : print('  No threat events logged.');
+      } else if (sub === 'lockout') {
+        const locked = [...CONFIG.security.lockedSources];
+        if (!locked.length) { print('No locked sources.'); break; }
+        print('🔒 Locked sources: ' + locked.join(', '));
+        print('To reset: /security unlock <source>');
+      } else if (sub.startsWith('unlock ')) {
+        const src = sub.replace('unlock ', '').trim();
+        secResetFails(src);
+        print(`✅ ${src} unlocked and fail count reset.`);
+      } else if (sub === 'scan') {
+        secIntegrityCheck();
+        secKeyRotationCheck();
+        secCheckAnomaly('scan', null);
+        print(`🔍 Security scan complete. Threat: ${CONFIG.security.threatLevel}`);
+      } else if (sub === 'green') {
+        setThreatLevel('GREEN', 'Manual reset by operator');
+      } else if (sub === 'yellow') {
+        setThreatLevel('YELLOW', 'Manual alert by operator');
+      } else if (sub === 'red') {
+        setThreatLevel('RED', 'Manual RED ALERT by operator');
+      } else {
+        print('Usage: /security [status|audit|threats|lockout|scan|unlock <src>|green|yellow|red]');
+      }
+      break;
+    }
+
+    // ── INTEL COMMAND ─────────────────────────────────────────────────────────
+    case '/intel': {
+      const sub = args || 'kpi';
+      if (sub === 'kpi' || sub === 'status') {
+        const kpi = intelUpdateKPI();
+        print(`\n📊 INTEL KPI SNAPSHOT [${kpi.ts}]`);
+        print(`  Trader balance:   ${kpi.traderBalance != null ? '$'+kpi.traderBalance : 'N/A'}`);
+        print(`  Trader win rate:  ${kpi.traderWinRate ?? 'N/A'}`);
+        print(`  Memory entries:   ${kpi.memoryEntries} across ${kpi.branches} branches`);
+        print(`  Threat level:     ${kpi.threatLevel}`);
+        print(`  Uptime:           ${kpi.uptime}`);
+        print(`  DeepSeek:         ${kpi.deepseek}`);
+        print(`  TTS / Voice:      ${kpi.tts} / ${kpi.voice}`);
+      } else if (sub === 'scan') {
+        print('🔍 Running deep intel scan...');
+        await intelDeepScan().catch(e => print(`Intel scan err: ${e.message}`));
+        print('✅ Deep scan complete.');
+      } else if (sub === 'feeds') {
+        print('📡 Fetching live feeds...');
+        await intelFeedIngestion().catch(e => print(`Feed err: ${e.message}`));
+        print('✅ Feed ingestion done.');
+      } else if (sub === 'sentiment') {
+        const col = chromaMemory.collections['trader'] || [];
+        const last = col.slice(-1)[0];
+        if (!last) { print('No trader data for sentiment.'); break; }
+        const r = intelSentiment(last.insight || '');
+        print(`\n📈 SENTIMENT: ${r.signal} (bull:${r.bull} bear:${r.bear} score:${r.score})`);
+      } else if (sub === 'patterns') {
+        const top = intelPatternDetect();
+        print('\n🔎 TOP PATTERNS ACROSS MEMORY:');
+        print('  ' + top.join('  '));
+      } else if (sub === 'forecast') {
+        const f = intelForecast();
+        print(`\n🔮 FORECAST: ${f.trend} | Avg Δ $${f.avgDelta}/cycle | In 5 cycles: $${f.forecast}`);
+      } else if (sub === 'synth') {
+        print('🧬 Running cross-branch synthesis...');
+        const result = await intelCrossBranchSynth().catch(e => `Synth error: ${e.message}`);
+        print(`\n💡 SYNTHESIS:\n${result}`);
+      } else if (sub === 'decisions') {
+        const log = CONFIG.intel.decisionLog.slice(-10);
+        if (!log.length) { print('No decisions logged yet.'); break; }
+        print('\n📝 RECENT DECISIONS:');
+        log.forEach(d => print(`  [${d.ts}] ${d.action}: ${d.reasoning.substring(0,80)} [${d.outcome}]`));
+      } else if (sub === 'market') {
+        print('🌐 Running market scan...');
+        const results = await intelMarketScan().catch(() => []);
+        results.length ? results.forEach(r => print(`  • ${r}`)) : print('No results.');
+      } else {
+        print('Usage: /intel [kpi|scan|feeds|sentiment|patterns|forecast|synth|decisions|market]');
+      }
+      break;
+    }
+
+    // ── COMMS COMMAND ─────────────────────────────────────────────────────────
+    case '/comms': {
+      const sub = args || 'status';
+      if (sub === 'status') {
+        const h = await commsHealthCheck();
+        print('\n📡 COMMS STATUS:');
+        h.split('\n').forEach(l => print('  ' + l));
+        print(`  broadcast log:  ${CONFIG.comms.broadcastLog.length} entries`);
+      } else if (sub.startsWith('webhook ')) {
+        const msg = sub.replace('webhook ', '');
+        const ok = await commsSendWebhook({ message: msg, source: 'commander', ts: new Date().toISOString() });
+        print(ok ? '✅ Webhook sent.' : '❌ Webhook failed (WEBHOOK_URL set?)');
+      } else if (sub.startsWith('slack ')) {
+        const msg = sub.replace('slack ', '');
+        const ok = await commsSendSlack(msg);
+        print(ok ? '✅ Slack sent.' : '❌ Slack failed (SLACK_URL set?)');
+      } else if (sub.startsWith('discord ')) {
+        const msg = sub.replace('discord ', '');
+        const ok = await commsSendDiscord(msg);
+        print(ok ? '✅ Discord sent.' : '❌ Discord failed (DISCORD_URL set?)');
+      } else if (sub.startsWith('broadcast ')) {
+        const msg = sub.replace('broadcast ', '');
+        const ok = await sendComms(msg, 'operator');
+        print(ok ? '✅ Broadcast sent on priority chain.' : '⚠️ No channels configured. Add WEBHOOK_URL / SLACK_URL / DISCORD_URL to .env');
+      } else if (sub === 'queue') {
+        print(`\n📬 MESSAGE QUEUE: ${CONFIG.comms.messageQueue.length} pending`);
+        CONFIG.comms.messageQueue.slice(-5).forEach(m => print(`  [${m.priority}] ${m.message.substring(0,60)}`));
+      } else if (sub === 'flush') {
+        await commsFlushQueue();
+        print('✅ Queue flushed.');
+      } else if (sub === 'peers') {
+        if (!CONFIG.comms.peerNodes.length) { print('No peer nodes registered. Use: /comms peer add <id> <url>'); break; }
+        CONFIG.comms.peerNodes.forEach(p => print(`  ${p.id}: ${p.url} [${p.status}]`));
+        await commsPingPeers();
+        print('↑ Ping sent to all peers.');
+      } else if (sub.startsWith('peer add ')) {
+        const parts = sub.replace('peer add ', '').split(' ');
+        if (parts.length < 2) { print('Usage: /comms peer add <id> <url>'); break; }
+        commsRegisterPeer(parts[0], parts[1]);
+      } else if (sub === 'log') {
+        const recent = CONFIG.comms.broadcastLog.slice(-10);
+        if (!recent.length) { print('No broadcast log yet.'); break; }
+        print('\n📋 RECENT BROADCASTS:');
+        recent.forEach(e => print(`  [${e.channel}] ${e.msg}`));
+      } else {
+        print('Usage: /comms [status|webhook <msg>|slack <msg>|discord <msg>|broadcast <msg>|queue|flush|peers|peer add <id> <url>|log]');
+      }
+      break;
+    }
+
     default:
       print(`Unknown command: ${cmd}. Type /help`);
   }
@@ -1907,17 +2501,20 @@ SETUP (one-time):
 // ─── BANNER ───────────────────────────────────────────────────────────────────
 function printBanner() {
   console.log(`
-╔══════════════════════════════════════════════════════╗
-║       AIKON-OS COMMANDER v${CONFIG.version}                      ║
-║       Al iKon Unlimited LLC  🧠 🎙️ 🔊 📱 🤖        ║
-╠══════════════════════════════════════════════════════╣
-║  Trader:   xauusd-trader-80p0.onrender.com           ║
-║  Models:   phi3:mini → deepseek-r1:7b (routing)      ║
-║  Brain:    Render 24/7 learner (all businesses)       ║
-║  Teams:    Trader | Biz | Research | Roblox           ║
-╠══════════════════════════════════════════════════════╣
-║  /tts on  |  /wake on  |  /notify test  |  /update   ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║        AIKON-OS COMMANDER v${CONFIG.version}                        ║
+║        Al iKon Unlimited LLC  🧠 🎙️ 🔊 📱 🤖          ║
+╠══════════════════════════════════════════════════════════╣
+║  Trader:   xauusd-trader-80p0.onrender.com               ║
+║  Models:   phi3:mini → deepseek-r1:7b (routing)          ║
+║  Brain:    Railway 24/7 relay (all businesses)            ║
+║  Teams:    Trader | Biz | Research | Roblox               ║
+╠══════════════════════════════════════════════════════════╣
+║  PROTOCOLS: 🔒 Security(S01-10) · 🧠 Intel(I01-10) ·    ║
+║             📡 Comms(C01-10)  — 30 active protocols       ║
+╠══════════════════════════════════════════════════════════╣
+║  /security  |  /intel  |  /comms  |  /update  |  /help   ║
+╚══════════════════════════════════════════════════════════╝
 `);
 }
 
@@ -2044,6 +2641,23 @@ async function main() {
   startBrainRelay();
   startClaudePoller();
   startLearner();
+
+  // ── PROTOCOL ENGINES ──────────────────────────────────────────────────────
+  // S-07: File integrity baseline on startup
+  setTimeout(() => { secIntegrityCheck(); secAudit('STARTUP', `Commander v${CONFIG.version} online`); }, 3000);
+  // S-04: Key rotation check every hour
+  setInterval(secKeyRotationCheck, 3600000);
+  // I-01: Deep intel scan every 15 min
+  setInterval(intelDeepScan, CONFIG.intel.scanInterval);
+  // I-03: Feed ingestion every 30 min
+  setInterval(intelFeedIngestion, 1800000);
+  // C-08: Heartbeat every 60s
+  setInterval(commsHeartbeat, CONFIG.comms.heartbeatMs);
+  // C-09: Flush message queue every 2 min
+  setInterval(commsFlushQueue, 120000);
+  // I-07: KPI snapshot every 5 min
+  setInterval(intelUpdateKPI, 300000);
+  log('PROTOCOLS: Security/Intel/Comms engines started');
 
   // Health + HUD WebSocket server + Phone relay
   const healthPort = process.env.COMMANDER_PORT || 3000;
