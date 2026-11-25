@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.10 — auto-spawns claude-poller.js; /update fetches both files
+// AIKON-OS Commander v3.11 — voice interrupt support; /v kills TTS before recording
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.10',
+  version:       '3.11',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -813,15 +813,25 @@ function runShell(cmd) {
 // ─── TTS — COMMANDER TALKS BACK ──────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
+let _ttsProc = null; // track active TTS so we can interrupt it
+
+function stopSpeaking() {
+  if (_ttsProc) {
+    try { _ttsProc.kill('SIGTERM'); } catch(e) {}
+    _ttsProc = null;
+  }
+}
+
 function speak(text) {
   if (!CONFIG.ttsEnabled) return;
   if (!fs.existsSync(CONFIG.voiceSpeak)) return;
-  // Truncate very long responses for speech
+  stopSpeaking(); // kill any ongoing speech before starting new one
   const spoken = text.replace(/[*_`#]/g, '').substring(0, 300);
   try {
-    spawn('python', [CONFIG.voiceSpeak, spoken, String(CONFIG.ttsRate)], {
+    _ttsProc = spawn('python', [CONFIG.voiceSpeak, spoken, String(CONFIG.ttsRate)], {
       stdio: 'ignore', detached: false
     });
+    _ttsProc.on('exit', () => { _ttsProc = null; });
   } catch(e) { log(`TTS_ERR: ${e.message}`); }
 }
 
@@ -989,15 +999,47 @@ async function runTeam(teamKey, task) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function ensureVoiceRecorder() {
-  if (fs.existsSync(CONFIG.voiceRecorder)) return;
-  const script = `# AIKON-OS Voice Recorder
+  // Always rewrite so latest version is on disk
+  const script = `# AIKON-OS Voice Recorder v2 — auto-detects working input device
 import sys, sounddevice as sd, soundfile as sf, numpy as np
 SAMPLE_RATE = 16000
 DURATION    = int(sys.argv[1]) if len(sys.argv) > 1 else 5
-print(f"[VOICE] Recording {DURATION}s... speak now", flush=True)
-audio = sd.rec(int(DURATION * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype='int16')
-sd.wait()
-sf.write(sys.argv[2] if len(sys.argv) > 2 else "voice_input.wav", audio, SAMPLE_RATE)
+OUT_FILE    = sys.argv[2] if len(sys.argv) > 2 else "voice_input.wav"
+
+def try_record(device_index=None):
+    audio = sd.rec(int(DURATION * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+                   channels=1, dtype='int16', device=device_index)
+    sd.wait()
+    return audio
+
+# Try default device first, then scan all input devices
+devices = sd.query_devices()
+tried = []
+audio = None
+
+# 1. Try default input
+try:
+    print(f"[VOICE] Recording {DURATION}s... speak now", flush=True)
+    audio = try_record(None)
+except Exception as e:
+    tried.append(f"default: {e}")
+
+# 2. Scan for any working input device
+if audio is None:
+    for i, dev in enumerate(devices):
+        if dev['max_input_channels'] > 0:
+            try:
+                audio = try_record(i)
+                print(f"[VOICE] Using device {i}: {dev['name']}", flush=True)
+                break
+            except Exception as e:
+                tried.append(f"dev{i} ({dev['name']}): {e}")
+
+if audio is None:
+    print(f"[VOICE_ERR] No working input device found. Tried: {tried}", flush=True)
+    sys.exit(1)
+
+sf.write(OUT_FILE, audio, SAMPLE_RATE)
 print("[VOICE] Done.", flush=True)
 `;
   fs.writeFileSync(CONFIG.voiceRecorder, script);
@@ -1031,6 +1073,7 @@ function spawnWhisper(whisper, wavPath, extraArgs) {
 function recordVoice(seconds = 5) {
   return new Promise((resolve, reject) => {
     ensureVoiceRecorder();
+    stopSpeaking(); // interrupt any ongoing TTS before we record
     print(`🎙️  Listening for ${seconds}s — speak now...`);
     const proc = spawn('python', [CONFIG.voiceRecorder, String(seconds), CONFIG.voiceWav]);
     let out = '';
@@ -1420,6 +1463,59 @@ async function handleCommand(input, rl) {
     case '/voice': {
       if (args === 'on')  { CONFIG.voiceEnabled = true;  print('🎙️  Voice enabled.'); break; }
       if (args === 'off') { CONFIG.voiceEnabled = false; print('🔇 Voice disabled.'); break; }
+      if (args === 'stop' || args === 'interrupt') {
+        stopSpeaking();
+        print('🔇 Speech stopped.');
+        break;
+      }
+      if (args === 'mobile') {
+        // Mobile voice: send a voice message or typed command via ntfy app → Commander reads it
+        if (!CONFIG.ntfyTopic) { print('❌ NTFY_TOPIC not set in .env — required for mobile voice.'); break; }
+        print(`📱 Mobile voice mode — open ntfy app, subscribe to "${CONFIG.ntfyTopic}", send your message.`);
+        print('⏳ Waiting 30s for message from phone...');
+        let found = false;
+        const start = Date.now();
+        const poll = setInterval(async () => {
+          if (Date.now() - start > 30_000) {
+            clearInterval(poll);
+            if (!found) print('⏱️  Mobile voice timed out — no message received.');
+            return;
+          }
+          try {
+            const res = await new Promise((resolve, reject) => {
+              https.get(`https://ntfy.sh/${CONFIG.ntfyTopic}/json?poll=1&since=10s`, res => {
+                let d = '';
+                res.on('data', c => d += c);
+                res.on('end', () => resolve(d));
+              }).on('error', reject);
+            });
+            const lines = res.trim().split('\n').filter(Boolean);
+            for (const line of lines) {
+              try {
+                const msg = JSON.parse(line);
+                if (msg.event === 'message' && msg.message) {
+                  clearInterval(poll);
+                  found = true;
+                  const text = msg.message.trim();
+                  print(`📱 Mobile: "${text}"`);
+                  if (text.startsWith('/')) {
+                    await handleCommand(text, rl);
+                  } else {
+                    print('🤔 Thinking...');
+                    remember('user', `[mobile] ${text}`);
+                    const { reply, model } = await askOllama(text, memory.filter(m => m.role !== 'note'));
+                    print(`\nCommander [${model}]: ${reply}\n`);
+                    speak(reply);
+                    remember('assistant', reply);
+                  }
+                  break;
+                }
+              } catch(e) {}
+            }
+          } catch(e) {}
+        }, 3000);
+        break;
+      }
       if (args === 'setup') {
         const pyCheck = runShell('python --version');
         const sdCheck = runShell('python -c "import sounddevice; print(sounddevice.__version__)"');
