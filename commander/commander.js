@@ -573,9 +573,16 @@ const NEWS_QUERIES = [
 async function learnFromTrader() {
   try {
     const s = JSON.parse(await httpGet(CONFIG.traderUrl));
-    const insight = `Trader: balance=$${s.balance?.toFixed(2)}, winRate=${s.winRate}%, status=${s.status}, price=$${s.currentPrice}, openTrades=${s.openTrades}`;
+    // winRate lives in s.stats (returned by computeStats()), not at root level
+    const winRate  = s.stats?.winRate ?? s.winRate ?? 'N/A';
+    const status   = s.dailyPaused ? 'paused' : (s.dbConnected ? 'live' : 'no-db');
+    const openCount = Array.isArray(s.openTrades) ? s.openTrades.length : 0;
+    const openSummary = Array.isArray(s.openTrades) && s.openTrades.length
+      ? s.openTrades.map(t => `${t.tradeType||'?'}@${t.entry||'?'}`).join(', ')
+      : 'none';
+    const insight = `Trader: balance=$${s.balance?.toFixed(2)}, winRate=${winRate}%, status=${status}, price=$${s.currentPrice?.toFixed(1)}, openTrades=${openCount} [${openSummary}], dailyPL=$${s.dailyPL?.toFixed(2)??'N/A'}`;
     chromaAdd('trader', { insight, source: 'trader_api' });
-    log(`LEARN: trader snapshot logged`);
+    log(`LEARN: trader snapshot logged — ${insight.substring(0,80)}`);
   } catch(e) { log(`LEARN_ERR trader: ${e.message}`); }
 }
 
@@ -671,14 +678,18 @@ async function syncFromBrain() {
 async function checkTrader() {
   try {
     const s = JSON.parse(await httpGet(CONFIG.traderUrl));
+    const winRate   = s.stats?.winRate ?? s.winRate ?? 'N/A';
+    const status    = s.dailyPaused ? 'PAUSED' : (s.dbConnected ? 'LIVE' : 'no-db');
+    const openCount = Array.isArray(s.openTrades) ? s.openTrades.length : (s.openTrades ?? 0);
     return [
       `📊 TRADER — ${new Date().toLocaleTimeString()}`,
       `Balance:       $${s.balance?.toFixed(2) ?? 'N/A'}`,
-      `Win Rate:      ${s.winRate ?? 'N/A'}%`,
-      `Open Trades:   ${s.openTrades ?? 0}`,
-      `Consec Losses: ${s.consecutiveLosses ?? 0}`,
-      `Price:         $${s.currentPrice ?? 'N/A'}`,
-      `Status:        ${s.status ?? 'N/A'}`,
+      `Win Rate:      ${winRate}%`,
+      `Open Trades:   ${openCount}`,
+      `Consec Losses: ${s.activityStats?.consecutiveLosses ?? s.consecutiveLosses ?? 0}`,
+      `Daily P/L:     $${s.dailyPL?.toFixed(2) ?? 'N/A'}`,
+      `Price:         $${s.currentPrice?.toFixed(2) ?? 'N/A'}`,
+      `Status:        ${status}`,
     ].join('\n');
   } catch(e) {
     return `❌ Trader unreachable: ${e.message}`;
