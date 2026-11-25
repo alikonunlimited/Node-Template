@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.8 — Claude↔Commander back-channel via Brain relay
+// AIKON-OS Commander v3.9 — auto-spawns claude-poller.js on startup
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.8',
+  version:       '3.9',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -310,6 +310,36 @@ function startBridgeLoop() {
 // ─── BRAIN RELAY (v3.8 — HTTP POST + Claude↔Commander back-channel) ─────────
 // Railway's nginx proxy forces WebSocket permessage-deflate at the infrastructure
 // level, causing RSV1 frame errors regardless of perMessageDeflate:false settings.
+// ── Claude Poller — spawns claude-poller.js as a child process ──
+// Polls Brain every 60s for /claude questions, answers via Ollama
+// (falls back to Claude API if set), posts responses back to Brain.
+function startClaudePoller() {
+  const pollerPath = path.join(__dirname, 'claude-poller.js');
+  if (!require('fs').existsSync(pollerPath)) {
+    log('POLLER: claude-poller.js not found in commander dir — skipping');
+    return;
+  }
+
+  function launch() {
+    const child = spawn(process.execPath, [pollerPath], {
+      cwd:   __dirname,
+      stdio: 'inherit',  // poller logs appear in same terminal
+      env:   process.env,
+    });
+    child.on('exit', (code) => {
+      log(`POLLER: exited (code ${code}) — restarting in 10s`);
+      setTimeout(launch, 10_000);
+    });
+    child.on('error', (err) => {
+      log(`POLLER: spawn error — ${err.message} — retrying in 10s`);
+      setTimeout(launch, 10_000);
+    });
+    log('POLLER: claude-poller.js started');
+  }
+
+  launch();
+}
+
 // Fix: use plain HTTP POST to /relay/push — no WebSocket upgrade, no proxy interference.
 // Commander POSTs events every 5s; Brain returns queued commands in the response.
 
@@ -1878,6 +1908,7 @@ async function main() {
   backgroundStartup();
   startBridgeLoop();
   startBrainRelay();
+  startClaudePoller();
   startLearner();
 
   // Health + HUD WebSocket server + Phone relay
