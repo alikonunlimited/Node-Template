@@ -1699,6 +1699,8 @@ async function main() {
   let commanderLastSeen = 0;
   const sseClients = new Set();   // SSE subscribers (not used for Commander→HUD; that's hudWss)
   const commandQueue = [];        // Commands queued from HUD for Commander to poll
+  const claudeQueue = [];         // Questions from Commander waiting for Claude to answer
+  const claudeResponseQueue = []; // Claude's answers waiting for Commander to pick up
 
   // Commander heartbeat watchdog — mark offline if no POST in 20s
   setInterval(() => {
@@ -1749,9 +1751,10 @@ async function main() {
       });
     }
 
-    // Return any queued commands for Commander to execute
+    // Return any queued commands AND Claude responses for Commander to process
     const pending = commandQueue.splice(0);
-    res.json({ ok: true, commands: pending });
+    const claudeResponses = claudeResponseQueue.splice(0);
+    res.json({ ok: true, commands: pending, claude_responses: claudeResponses });
   });
 
   // POST /relay/command — HUD browser sends a command to Commander via Brain
@@ -1767,6 +1770,50 @@ async function main() {
   app.get('/relay/status', (req, res) => {
     res.json({ commanderConnected, lastSeen: commanderLastSeen, queueDepth: commandQueue.length });
   });
+
+  // ─── CLAUDE ↔ COMMANDER BACK-CHANNEL ────────────────────────────────────────
+  // Commander POSTs a question → Brain queues it → Claude polls → Claude POSTs answer
+  // → Brain queues response → Commander picks it up on next /relay/push tick
+
+  // POST /relay/claude-ask — Commander sends a question for Claude
+  app.post('/relay/claude-ask', (req, res) => {
+    const key = req.headers['x-bridge-key'];
+    if (process.env.BRIDGE_KEY && key !== process.env.BRIDGE_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const { question, id } = req.body || {};
+    if (!question) return res.status(400).json({ error: 'missing question' });
+    const entry = { id: id || `q-${Date.now()}`, question, ts: Date.now() };
+    claudeQueue.push(entry);
+    log(`CLAUDE-ASK: queued question [${entry.id}]: ${question.substring(0, 80)}`);
+    res.json({ ok: true, id: entry.id });
+  });
+
+  // GET /relay/claude-ask — Claude polls for pending questions from Commander
+  app.get('/relay/claude-ask', (req, res) => {
+    const key = req.headers['x-bridge-key'];
+    if (process.env.BRIDGE_KEY && key !== process.env.BRIDGE_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const pending = claudeQueue.splice(0);
+    res.json({ ok: true, questions: pending });
+  });
+
+  // POST /relay/claude-response — Claude POSTs its answer; Commander picks it up on next heartbeat
+  app.post('/relay/claude-response', (req, res) => {
+    const key = req.headers['x-bridge-key'];
+    if (process.env.BRIDGE_KEY && key !== process.env.BRIDGE_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const { id, response } = req.body || {};
+    if (!response) return res.status(400).json({ error: 'missing response' });
+    claudeResponseQueue.push({ id: id || 'unknown', response, ts: Date.now() });
+    log(`CLAUDE-RESPONSE: queued response [${id}]: ${response.substring(0, 80)}`);
+    res.json({ ok: true });
+  });
+
+  // Modify /relay/push to also return queued Claude responses
+  // (Already patched below — responses drained in /relay/push handler)
 
   if (WS) {
     const { WebSocketServer } = WS;

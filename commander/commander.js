@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.6 — SSE/HTTP POST Brain Relay (bypasses Railway proxy compression)
+// AIKON-OS Commander v3.8 — Claude↔Commander back-channel via Brain relay
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.7',
+  version:       '3.8',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -307,7 +307,7 @@ function startBridgeLoop() {
   setTimeout(bridgeHeartbeat, 2000);
 }
 
-// ─── BRAIN RELAY (v3.6 — HTTP POST, bypasses Railway proxy compression) ───────
+// ─── BRAIN RELAY (v3.8 — HTTP POST + Claude↔Commander back-channel) ─────────
 // Railway's nginx proxy forces WebSocket permessage-deflate at the infrastructure
 // level, causing RSV1 frame errors regardless of perMessageDeflate:false settings.
 // Fix: use plain HTTP POST to /relay/push — no WebSocket upgrade, no proxy interference.
@@ -323,37 +323,10 @@ function startBrainRelay() {
   CONFIG._relayQueue = [];   // events queued for next POST
   CONFIG.brainConnected = false;
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (CONFIG.bridgeKey) headers['x-bridge-key'] = CONFIG.bridgeKey;
+  const relayHeaders = {};
+  if (CONFIG.bridgeKey) relayHeaders['x-bridge-key'] = CONFIG.bridgeKey;
 
-  // Helper: HTTP POST using built-in https/http
-  function postJson(url, body) {
-    return new Promise((resolve, reject) => {
-      const data = JSON.stringify(body);
-      const parsed = new URL(url);
-      const mod = parsed.protocol === 'https:' ? require('https') : require('http');
-      const req = mod.request({
-        hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-        path: parsed.pathname + parsed.search,
-        method: 'POST',
-        headers: { ...headers, 'Content-Length': Buffer.byteLength(data) },
-        timeout: 8000
-      }, (res) => {
-        let body = '';
-        res.on('data', d => body += d);
-        res.on('end', () => {
-          try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
-          catch(e) { resolve({ status: res.statusCode, body: {} }); }
-        });
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-      req.write(data);
-      req.end();
-    });
-  }
-
+  // Uses top-level httpPost helper (no duplicate needed)
   async function relayTick() {
     // Drain queue — send all buffered events, plus a heartbeat if queue is empty
     const events = CONFIG._relayQueue.splice(0);
@@ -365,27 +338,35 @@ function startBrainRelay() {
     // POST all events in a batch (send each individually for simplicity)
     for (const event of events) {
       try {
-        const result = await postJson(pushUrl, event);
-        if (result.status === 200) {
-          if (!CONFIG.brainConnected) {
-            CONFIG.brainConnected = true;
-            log('RELAY: connected to Brain via HTTP POST ✓ — HUD will show LIVE');
-            // Send hello so HUD gets version info
-            CONFIG._relayQueue.push({
-              t: 'hello', version: CONFIG.version,
-              uptime: Math.floor(process.uptime()), ts: Date.now()
-            });
+        const result = await httpPost(pushUrl, event, relayHeaders);
+        // httpPost resolves to parsed JSON body directly
+        const body = result;
+        if (body && body.error === 'unauthorized') {
+          log('RELAY: unauthorized — check BRIDGE_KEY in .env');
+          continue;
+        }
+        if (!CONFIG.brainConnected) {
+          CONFIG.brainConnected = true;
+          log('RELAY: connected to Brain via HTTP POST ✓ — HUD will show LIVE');
+          // Send hello so HUD gets version info
+          CONFIG._relayQueue.push({
+            t: 'hello', version: CONFIG.version,
+            uptime: Math.floor(process.uptime()), ts: Date.now()
+          });
+        }
+        // Process any commands Brain queued for us
+        const cmds = body.commands || [];
+        for (const cmd of cmds) {
+          if (cmd.command) {
+            log(`RELAY: received command from HUD: ${cmd.command}`);
+            handleCommand(cmd.command, null).catch(() => {});
           }
-          // Process any commands Brain queued for us
-          const cmds = result.body.commands || [];
-          for (const cmd of cmds) {
-            if (cmd.command) {
-              log(`RELAY: received command from HUD: ${cmd.command}`);
-              handleCommand(cmd.command, null).catch(() => {});
-            }
-          }
-        } else if (result.status === 401) {
-          log('RELAY: unauthorized — check BRIDGE_KEY');
+        }
+        // Process any Claude responses queued for us
+        const claudeResps = body.claude_responses || [];
+        for (const resp of claudeResps) {
+          print(`\n🤖 Claude [${resp.id}]: ${resp.response}\n`);
+          log(`CLAUDE-RESPONSE [${resp.id}]: ${resp.response.substring(0, 200)}`);
         }
       } catch(e) {
         if (CONFIG.brainConnected) {
@@ -1705,6 +1686,7 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /deny <id>           — 🚫 Deny a queued action
   /bridge status|history|send — 🌉 Bridge control
   /brain status|sync|opportunities — 🧠 Brain (Render 24/7) control
+  /claude <question>   — 💬 Ask Claude a question (answer arrives on next tick)
   /branch add|list     — 🌿 Manage business branches
   /status              — 🖥️  Full system status
   /shell <cmd>         — ⚙️  Run shell command
@@ -1735,6 +1717,22 @@ SETUP (one-time):
       log('COMMANDER: shutdown');
       if (rl) rl.close();
       process.exit(0);
+    }
+
+    // ── ASK CLAUDE ──────────────────────────────────────────────────────────────
+    case '/claude': {
+      if (!args) { print('Usage: /claude <question>'); break; }
+      if (!CONFIG.brainUrl) { print('❌ BRAIN_URL not set — cannot reach Claude'); break; }
+      const qId = `q-${Date.now()}`;
+      print(`📡 Sending to Claude [${qId}]... (answer arrives on next heartbeat tick)`);
+      const askUrl = CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask';
+      try {
+        await httpPost(askUrl, { question: args, id: qId }, bridgeHeaders());
+        log(`CLAUDE-ASK [${qId}]: ${args}`);
+      } catch(e) {
+        print(`❌ Failed to reach Brain: ${e.message}`);
+      }
+      break;
     }
 
     default:
