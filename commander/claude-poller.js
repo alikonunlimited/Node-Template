@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// AIKON-OS Claude Poller v1.2
+// AIKON-OS Claude Poller v1.3
 // Polls Brain every 60s for /claude questions from Commander.
 // Answers via Ollama (free, local) first.
 // Falls back to Claude API if Ollama times out or fails.
@@ -29,9 +29,9 @@ try {
 const BRAIN_URL    = (process.env.BRAIN_URL || '').replace(/\/$/, '').replace(/\/jarvis$/, '');
 const BRIDGE_KEY   = process.env.BRIDGE_KEY  || '';
 const OLLAMA_URL   = process.env.OLLAMA_URL   || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'deepseek-r1:7b';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'phi3:mini';
 const CLAUDE_KEY   = process.env.CLAUDE_API_KEY || '';
-const OLLAMA_TIMEOUT_MS = 25_000; // fall back to Claude API after 25s
+const OLLAMA_TIMEOUT_MS = 90_000; // fall back to Claude API after 25s
 const POLL_MS      = 60_000;
 
 if (!BRAIN_URL)  { console.error('[POLLER] BRAIN_URL not set in .env'); process.exit(1); }
