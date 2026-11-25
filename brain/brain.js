@@ -870,7 +870,7 @@ const JARVIS_HUD_HTML = `<!DOCTYPE html>
   --glow-gold:0 0 30px #ffaa0066,0 0 60px #ff880033;
 }
 html,body{width:100%;height:100%;background:var(--bg);color:var(--gold);font-family:var(--font-hud);overflow:hidden}
-body{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:1fr;height:100vh}
+body{display:grid;grid-template-rows:auto 1fr auto auto;grid-template-columns:1fr;height:100vh}
 
 /* ── STARS ── */
 #stars{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
@@ -1078,6 +1078,42 @@ body{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:1fr;hei
 .uptime-val{color:var(--green);font-family:var(--font-mono)}
 .version-val{color:rgba(255,140,0,.6)}
 
+/* ── COMMAND BAR ── */
+#cmdbar{
+  position:relative;z-index:10;
+  display:flex;align-items:center;gap:8px;
+  padding:8px 16px;
+  background:rgba(5,3,15,.95);
+  border-top:1px solid rgba(255,140,0,.35);
+}
+#cmd-input{
+  flex:1;background:rgba(255,140,0,.05);border:1px solid rgba(255,140,0,.3);
+  color:var(--gold3);font-family:var(--font-mono);font-size:.8rem;
+  padding:7px 12px;border-radius:4px;outline:none;
+  transition:border-color .2s,box-shadow .2s;
+}
+#cmd-input:focus{border-color:var(--gold);box-shadow:0 0 10px rgba(255,140,0,.2)}
+#cmd-input::placeholder{color:rgba(255,140,0,.3)}
+#mic-btn,#send-btn,#wake-btn{
+  background:rgba(255,140,0,.08);border:1px solid rgba(255,140,0,.35);
+  color:var(--gold);font-family:var(--font-hud);font-size:.7rem;
+  padding:7px 14px;border-radius:4px;cursor:pointer;letter-spacing:.08em;
+  transition:background .2s,box-shadow .2s;white-space:nowrap;
+}
+#mic-btn:hover,#send-btn:hover,#wake-btn:hover{background:rgba(255,140,0,.2);box-shadow:0 0 10px rgba(255,140,0,.3)}
+#mic-btn.active{background:rgba(255,51,102,.2);border-color:var(--red);color:var(--red);animation:micPulse 1s ease-in-out infinite}
+@keyframes micPulse{0%,100%{box-shadow:0 0 6px rgba(255,51,102,.3)}50%{box-shadow:0 0 18px rgba(255,51,102,.7)}}
+#mic-indicator{display:flex;align-items:center;gap:6px;color:var(--red);font-size:.65rem;letter-spacing:.1em;white-space:nowrap}
+.mic-pulse{width:8px;height:8px;border-radius:50%;background:var(--red);animation:micPulse 1s ease-in-out infinite}
+#wake-btn{color:var(--cyan);border-color:rgba(0,245,255,.35)}
+#cmd-response{
+  position:absolute;bottom:100%;left:0;right:0;
+  background:rgba(5,3,20,.97);border-top:1px solid rgba(255,140,0,.2);
+  padding:10px 20px;font-family:var(--font-mono);font-size:.75rem;color:var(--gold3);
+  max-height:140px;overflow-y:auto;white-space:pre-wrap;z-index:20;
+  border-left:3px solid var(--gold);
+}
+
 /* ── SCANLINES ── */
 body::after{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:999;
@@ -1204,6 +1240,19 @@ body::before{
   <span class="version-val" id="b-version">v--</span>
   <span style="margin-left:auto;color:rgba(255,140,0,.2)">AL iKON UNLIMITED LLC</span>
 </div>
+
+<!-- COMMAND BAR -->
+<div id="cmdbar">
+  <button id="mic-btn" title="Speak to Commander" onclick="toggleMic()">🎙️</button>
+  <div id="mic-indicator" style="display:none">
+    <span class="mic-pulse"></span><span id="mic-label">Listening...</span>
+  </div>
+  <input id="cmd-input" type="text" placeholder="Speak or type a command... (Enter to send)" autocomplete="off"
+    onkeydown="if(event.key==='Enter')sendCmd()">
+  <button id="send-btn" onclick="sendCmd()">▶ SEND</button>
+  <button id="wake-btn" title="Wake Thomas" onclick="wakeThomas()" style="display:none">⚡ WAKE</button>
+</div>
+<div id="cmd-response" style="display:none"></div>
 
 <script>
 // ── CONFIG ──
@@ -1375,6 +1424,145 @@ async function loadMemoryFeed() {
       <div class="mem-text">\${escapeHtml((m.content||m.insight||'').substring(0,120))}</div>
     </div>\`).join('');
   } catch(e) {}
+}
+
+// ── COMMAND BAR ──
+let commanderOnline = false;
+
+// Track online/offline from WS events
+const _origHandleWsMsg = handleWsMsg;
+function handleWsMsg(d) {
+  if (d.t === 'hello' || d.t === 'stats') commanderOnline = true;
+  if (d.t === 'offline') { commanderOnline = false; showWakeBtn(true); }
+  _origHandleWsMsg(d);
+}
+// Also flip offline on WS close
+const _origScheduleReconnect = scheduleReconnect;
+function scheduleReconnect(reason) {
+  commanderOnline = false;
+  showWakeBtn(true);
+  _origScheduleReconnect(reason);
+}
+function showWakeBtn(show) {
+  document.getElementById('wake-btn').style.display = show ? '' : 'none';
+}
+
+function showCmdResponse(text, isOffline) {
+  const el = document.getElementById('cmd-response');
+  el.style.display = 'block';
+  el.style.borderLeftColor = isOffline ? 'var(--red)' : 'var(--gold)';
+  el.textContent = text;
+  setTimeout(() => { el.style.display = 'none'; }, 12000);
+}
+
+async function sendCmd() {
+  const input = document.getElementById('cmd-input');
+  const text  = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addFeed('cmd', '▶ ' + text);
+
+  if (!commanderOnline) {
+    // Offline mode — query Brain memory
+    showCmdResponse('⚡ Thomas offline — searching Brain memory...', true);
+    try {
+      const r  = await fetch(\`\${BRAIN_URL}/message\`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ message: text })
+      });
+      const d  = await r.json();
+      const ans = d.response || d.answer || 'No memory found.';
+      showCmdResponse(
+        (d.offline ? '📴 OFFLINE MODE — Brain Memory:\\n' : '') + ans +
+        (d.offline ? '\\n\\n[Click ⚡ WAKE to bring Thomas online]' : ''),
+        d.offline
+      );
+    } catch(e) {
+      showCmdResponse('Brain unreachable. Check connection.', true);
+    }
+    return;
+  }
+
+  // Online — send to Commander via relay
+  try {
+    const r = await fetch(\`\${BRAIN_URL}/relay/command\`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ command: text, source: 'hud' })
+    });
+    const d = await r.json();
+    if (d.ok) showCmdResponse('✓ Sent to Commander — response appears in feed above');
+    else showCmdResponse('❌ Relay error: ' + (d.error||'unknown'));
+  } catch(e) {
+    showCmdResponse('❌ ' + e.message, true);
+  }
+}
+
+// ── WAKE THOMAS ──
+async function wakeThomas() {
+  try {
+    await fetch('https://ntfy.sh/aikon-commander-al', {
+      method: 'POST',
+      headers: { 'Title': 'AIKON-OS', 'Priority': 'high', 'Tags': 'computer' },
+      body: 'Commander offline — wake Thomas and start Commander'
+    });
+    showCmdResponse('📱 Wake notification sent to Thomas. Start Commander, then reconnect.');
+  } catch(e) {
+    showCmdResponse('Could not send wake notification: ' + e.message, true);
+  }
+}
+
+// ── MIC — Web Speech API ──
+let recognition = null, micActive = false;
+
+function toggleMic() {
+  if (micActive) { stopMic(); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    showCmdResponse('❌ Browser mic not supported. Use Chrome or Safari.');
+    return;
+  }
+  recognition = new SR();
+  recognition.lang = 'en-US';
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  const btn = document.getElementById('mic-btn');
+  const ind = document.getElementById('mic-indicator');
+  const lbl = document.getElementById('mic-label');
+  const inp = document.getElementById('cmd-input');
+
+  recognition.onstart = () => {
+    micActive = true;
+    btn.classList.add('active');
+    btn.textContent = '⏹';
+    ind.style.display = 'flex';
+    inp.placeholder = 'Listening...';
+  };
+  recognition.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    inp.value = transcript;
+    lbl.textContent = transcript.substring(0, 40) + (transcript.length > 40 ? '...' : '');
+    if (e.results[0].isFinal) { stopMic(); sendCmd(); }
+  };
+  recognition.onerror = (e) => {
+    stopMic();
+    showCmdResponse('Mic error: ' + e.error + (e.error === 'not-allowed' ? ' — allow mic in browser settings' : ''));
+  };
+  recognition.onend = () => stopMic();
+  recognition.start();
+}
+
+function stopMic() {
+  micActive = false;
+  if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
+  const btn = document.getElementById('mic-btn');
+  const ind = document.getElementById('mic-indicator');
+  const inp = document.getElementById('cmd-input');
+  btn.classList.remove('active');
+  btn.textContent = '🎙️';
+  ind.style.display = 'none';
+  inp.placeholder = 'Speak or type a command... (Enter to send)';
 }
 
 // ── INIT ──
