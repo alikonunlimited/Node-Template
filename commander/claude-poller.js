@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// AIKON-OS Claude Poller v1.1
+// AIKON-OS Claude Poller v1.2
 // Polls Brain every 60s for /claude questions from Commander.
 // Answers via Ollama (free, local) first.
 // Falls back to Claude API if Ollama times out or fails.
@@ -25,7 +25,8 @@ try {
   process.exit(1);
 }
 
-const BRAIN_URL    = (process.env.BRAIN_URL || '').replace(/\/$/, '');
+// Strip any trailing page path like /jarvis — relay endpoints live at root
+const BRAIN_URL    = (process.env.BRAIN_URL || '').replace(/\/$/, '').replace(/\/jarvis$/, '');
 const BRIDGE_KEY   = process.env.BRIDGE_KEY  || '';
 const OLLAMA_URL   = process.env.OLLAMA_URL   || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'deepseek-r1:7b';
