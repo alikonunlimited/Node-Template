@@ -1469,31 +1469,34 @@ async function handleCommand(input, rl) {
         break;
       }
       if (args === 'mobile') {
-        // Mobile voice: send a voice message or typed command via ntfy app → Commander reads it
+        // Mobile voice: send command from ntfy app on phone → Commander executes it
         if (!CONFIG.ntfyTopic) { print('❌ NTFY_TOPIC not set in .env — required for mobile voice.'); break; }
-        print(`📱 Mobile voice mode — open ntfy app, subscribe to "${CONFIG.ntfyTopic}", send your message.`);
-        print('⏳ Waiting 30s for message from phone...');
+        print(`📱 Mobile mode — send a message to ntfy topic: ${CONFIG.ntfyTopic}`);
+        print(`   App: ntfy.sh  |  Topic: ${CONFIG.ntfyTopic}  |  Waiting 60s...`);
+        const sinceTs = Math.floor(Date.now() / 1000); // unix seconds — only catch NEW messages
         let found = false;
         const start = Date.now();
         const poll = setInterval(async () => {
-          if (Date.now() - start > 30_000) {
+          if (Date.now() - start > 60_000) {
             clearInterval(poll);
             if (!found) print('⏱️  Mobile voice timed out — no message received.');
             return;
           }
           try {
             const res = await new Promise((resolve, reject) => {
-              https.get(`https://ntfy.sh/${CONFIG.ntfyTopic}/json?poll=1&since=10s`, res => {
-                let d = '';
-                res.on('data', c => d += c);
-                res.on('end', () => resolve(d));
-              }).on('error', reject);
+              const req = https.get(
+                `https://ntfy.sh/${CONFIG.ntfyTopic}/json?poll=1&since=${sinceTs}`,
+                { headers: { 'User-Agent': 'AIKON-Commander' } },
+                r => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d)); }
+              );
+              req.on('error', reject);
+              req.setTimeout(5000, () => { req.destroy(); reject(new Error('poll timeout')); });
             });
             const lines = res.trim().split('\n').filter(Boolean);
             for (const line of lines) {
               try {
                 const msg = JSON.parse(line);
-                if (msg.event === 'message' && msg.message) {
+                if (msg.event === 'message' && msg.message && (msg.time||0) >= sinceTs) {
                   clearInterval(poll);
                   found = true;
                   const text = msg.message.trim();
@@ -1503,16 +1506,18 @@ async function handleCommand(input, rl) {
                   } else {
                     print('🤔 Thinking...');
                     remember('user', `[mobile] ${text}`);
-                    const { reply, model } = await askOllama(text, memory.filter(m => m.role !== 'note'));
-                    print(`\nCommander [${model}]: ${reply}\n`);
-                    speak(reply);
-                    remember('assistant', reply);
+                    try {
+                      const { reply, model } = await askOllama(text, memory.filter(m => m.role !== 'note'));
+                      print(`\nCommander [${model}]: ${reply}\n`);
+                      speak(reply);
+                      remember('assistant', reply);
+                    } catch(e) { print(`❌ ${e.message}`); }
                   }
                   break;
                 }
               } catch(e) {}
             }
-          } catch(e) {}
+          } catch(e) { /* silent poll error — keep trying */ }
         }, 3000);
         break;
       }
