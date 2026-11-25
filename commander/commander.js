@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.9 — auto-spawns claude-poller.js on startup
+// AIKON-OS Commander v3.10 — auto-spawns claude-poller.js; /update fetches both files
 // Location: D:\AIKON-OS\commander\commander.js
 // Start: node D:\AIKON-OS\commander\commander.js
 // Update: /update  — pulls latest from GitHub and restarts
@@ -66,7 +66,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.9',
+  version:       '3.10',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -727,6 +727,8 @@ async function selfUpdate(token) {
     const latestVer = extractVersion(code);
     if (latestVer === CONFIG.version) {
       print(`✅ Already on latest version (v${CONFIG.version}). No update needed.`);
+      // Still refresh claude-poller.js even if commander is current
+      await updatePoller(token);
       return;
     }
     print(`🆕 Update found: v${CONFIG.version} → v${latestVer}`);
@@ -734,8 +736,11 @@ async function selfUpdate(token) {
     const backupPath = selfPath + '.backup';
     fs.copyFileSync(selfPath, backupPath);
     fs.writeFileSync(selfPath, code, 'utf8');
-    print(`✅ Updated to v${latestVer}. Restarting Commander...`);
+    print(`✅ Commander updated to v${latestVer}.`);
     log(`SELF_UPDATE: v${CONFIG.version} → v${latestVer} sha=${sha.substring(0,8)}`);
+    // Also fetch claude-poller.js
+    await updatePoller(token);
+    print(`🔄 Restarting Commander...`);
     await bridgeSend('status', `Commander self-updated v${CONFIG.version} → v${latestVer}. Restarting.`, 'claude');
     const child = spawn(process.execPath, [selfPath], { detached: true, stdio: 'inherit', cwd: __dirname });
     child.unref();
@@ -743,6 +748,23 @@ async function selfUpdate(token) {
   } catch(e) {
     print(`❌ Update failed: ${e.message}`);
     log(`SELF_UPDATE_ERR: ${e.message}`);
+  }
+}
+
+async function updatePoller(token) {
+  try {
+    print(`⬇️  Fetching claude-poller.js from GitHub...`);
+    const pollerGithubPath = 'commander/claude-poller.js';
+    const json = await githubGetFile(token, CONFIG.updateRepo, pollerGithubPath);
+    if (!json.content) throw new Error(json.message || 'No content for claude-poller.js');
+    const pollerCode = Buffer.from(json.content, 'base64').toString('utf8');
+    const pollerPath = path.join(__dirname, 'claude-poller.js');
+    fs.writeFileSync(pollerPath, pollerCode, 'utf8');
+    print(`✅ claude-poller.js updated.`);
+    log(`SELF_UPDATE: claude-poller.js refreshed sha=${(json.sha||'').substring(0,8)}`);
+  } catch(e) {
+    print(`⚠️  claude-poller.js update skipped: ${e.message}`);
+    log(`SELF_UPDATE_WARN: poller update failed — ${e.message}`);
   }
 }
 
