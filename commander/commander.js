@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.15 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.16 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.15',
+  version:       '3.16',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -1334,6 +1334,16 @@ async function bridgePoll() {
   } catch(e) { log(`BRIDGE_POLL_ERR: ${e.message}`); return []; }
 }
 
+// Bridge v2.1 ack — call after successfully processing polled messages
+// Prevents message loss if Commander crashes between poll and processing
+async function bridgeAck(ids) {
+  if (!CONFIG.bridgeUrl || !ids || !ids.length) return;
+  try {
+    await httpPost(`${CONFIG.bridgeUrl}/ack`, { ids }, bridgeHeaders());
+    log(`BRIDGE_ACK: ${ids.length} messages acknowledged`);
+  } catch(e) { log(`BRIDGE_ACK_ERR: ${e.message}`); }
+}
+
 async function bridgeHeartbeat() {
   if (!CONFIG.bridgeUrl) return;
   try {
@@ -1362,16 +1372,27 @@ function startBridgeLoop() {
   setInterval(async () => {
     await bridgeHeartbeat();
     const msgs = await bridgePoll();
-    for (const msg of msgs) {
-      print(`\n📨 MESSAGE FROM ${msg.from.toUpperCase()} [${msg.type}]:\n${msg.content}`);
-      log(`BRIDGE_MSG: from=${msg.from} type=${msg.type} content=${msg.content.substring(0,100)}`);
-      remember('bridge_in', `[${msg.from}/${msg.type}] ${msg.content}`);
+    if (msgs.length === 0) return;
 
-      if (msg.type === 'command' && msg.content.startsWith('/')) {
-        print(`⚙️  Auto-executing bridge command: ${msg.content}`);
-        await handleCommand(msg.content, null);
+    const processedIds = [];
+    for (const msg of msgs) {
+      try {
+        print(`\n📨 MESSAGE FROM ${msg.from.toUpperCase()} [${msg.type}]:\n${msg.content}`);
+        log(`BRIDGE_MSG: from=${msg.from} type=${msg.type} content=${msg.content.substring(0,100)}`);
+        remember('bridge_in', `[${msg.from}/${msg.type}] ${msg.content}`);
+
+        if (msg.type === 'command' && msg.content.startsWith('/')) {
+          print(`⚙️  Auto-executing bridge command: ${msg.content}`);
+          await handleCommand(msg.content, null);
+        }
+        // Only ack after successful processing
+        processedIds.push(msg.id);
+      } catch(e) {
+        log(`BRIDGE_MSG_ERR: ${e.message} — msg ${msg.id} not acked, will retry next poll`);
       }
     }
+    // Ack all successfully processed messages (FIX-7 ack-on-process)
+    if (processedIds.length > 0) await bridgeAck(processedIds);
   }, CONFIG.pollInterval);
 
   setTimeout(bridgeHeartbeat, 2000);
