@@ -2319,20 +2319,21 @@ Format each field on its own line with the label. Make it ready to deploy — no
 async function teamLLM(prompt, label) {
   const model = CONFIG.ollamaModel;
   try {
-    const body = JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false });
+    // Keep_alive=0 tells Ollama to unload model immediately after response — frees RAM on 8GB systems
+    const body = JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false, keep_alive: 0 });
     return await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
         path: '/api/chat', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 120000,
+        timeout: 300000, // 5 min — social content generation can be slow on 8GB
       }, res => {
         let d = '';
         res.on('data', c => d += c);
         res.on('end', () => { try { resolve(JSON.parse(d).message?.content || 'No response'); } catch(e) { resolve(d); } });
       });
       req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout after 5min — try /optimize first')); });
       req.write(body); req.end();
     });
   } catch(e) {
