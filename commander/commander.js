@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.16 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.17 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.16',
+  version:       '3.17',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -93,10 +93,40 @@ const CONFIG = {
   ntfyTopic:     process.env.NTFY_TOPIC || '',  // set to your unique topic e.g. aikon-commander-abc123
   // Teams
   teams: {
-    trader:   { name: 'Trader Team',   model: 'deepseek-r1:7b', branch: 'trader',   active: true },
-    biz:      { name: 'Biz Team',      model: 'deepseek-r1:7b', branch: 'opportunities', active: true },
-    research: { name: 'Research Team', model: 'phi3:mini',       branch: 'opportunities', active: true },
-    roblox:   { name: 'Roblox Team',   model: 'phi3:mini',       branch: 'roblox',   active: true },
+    trader:   { name: 'Trader Team',   model: 'deepseek-r1:7b', branch: 'trader',         active: true },
+    biz:      { name: 'Biz Team',      model: 'deepseek-r1:7b', branch: 'opportunities',  active: true },
+    research: { name: 'Research Team', model: 'phi3:mini',       branch: 'opportunities',  active: true },
+    roblox:   { name: 'Roblox Team',   model: 'phi3:mini',       branch: 'roblox',         active: true },
+    social:   { name: 'Social Team',   model: 'phi3:mini',       branch: 'social',         active: true },
+  },
+  // Social Media — credentials loaded from env, never hardcoded
+  social: {
+    tiktok: {
+      handle:   '@al.ikon.unlimited',
+      focus:    'Al iKon Unlimited LLC brand — Roblox, KnowYourBallot, business tips',
+      apiKey:   process.env.TIKTOK_CLIENT_KEY    || '',
+      apiSecret:process.env.TIKTOK_CLIENT_SECRET || '',
+      accessToken: process.env.TIKTOK_ACCESS_TOKEN || '',
+    },
+    twitter: {
+      handle:   '@Al_ikonunltd',
+      focus:    'Al iKon Unlimited LLC — business, tech, Roblox, trading insights',
+      apiKey:      process.env.TWITTER_API_KEY       || '',
+      apiSecret:   process.env.TWITTER_API_SECRET    || '',
+      accessToken: process.env.TWITTER_ACCESS_TOKEN  || '',
+      accessSecret:process.env.TWITTER_ACCESS_SECRET || '',
+    },
+    instagram: {
+      accounts: {
+        alikon_marketing: { handle: 'alikon_marketing', focus: 'Al iKon Unlimited LLC marketing', accessToken: process.env.IG_ALIKON_TOKEN || '' },
+        onairnetwork_inc: { handle: 'onairnetwork_inc', focus: 'StreamNet / OnAir Network streaming hub', accessToken: process.env.IG_ONAIR_TOKEN  || '' },
+        tjsdemoreels:     { handle: 'tjsdemoreels',     focus: 'Personal/demo reel — creative showcase',  accessToken: process.env.IG_TJS_TOKEN   || '' },
+      },
+    },
+    // Autonomous post queue — Social Team drops packages here, Commander deploys
+    postQueue: [],
+    // Last run timestamp per platform
+    lastRun: {},
   },
   // Approval queue — big decisions wait here
   pendingApprovals: [],
@@ -2104,6 +2134,229 @@ async function runTeam(teamKey, task) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ─── SOCIAL MEDIA TEAM ───────────────────────────────────────────────────────
+// Research → Create → Deploy pipeline for TikTok, X, Instagram
+// Commander posts autonomously once Social Team delivers a deployable package.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Trend research per platform ───────────────────────────────────────────────
+async function socialResearch(platform) {
+  const cfg = CONFIG.social[platform] || {};
+  const focus = cfg.focus || cfg.accounts ? Object.values(cfg.accounts || {}).map(a=>a.focus).join(', ') : 'Al iKon Unlimited LLC';
+  const prompt = `You are the Social Research Agent for AIKON-OS.
+Platform: ${platform.toUpperCase()}
+Brand focus: ${focus}
+
+Research task:
+1. What content formats perform best on ${platform} right now for a small business / creator?
+2. What trending topics or hashtags fit this brand?
+3. What posting frequency and time-of-day strategy maximizes reach?
+4. What monetization and sponsorship signals does ${platform} look for?
+5. Give 3 specific content IDEAS ready to hand to the Content Creator Agent.
+
+Be concise. Output as numbered sections. Focus on what's deployable THIS WEEK.`;
+
+  return await teamLLM(prompt, 'social research');
+}
+
+// ── Content creation per platform ─────────────────────────────────────────────
+async function socialCreate(platform, researchReport, accountKey) {
+  const cfg     = CONFIG.social[platform] || {};
+  const account = cfg.accounts ? (cfg.accounts[accountKey] || Object.values(cfg.accounts)[0]) : cfg;
+  const handle  = account.handle || accountKey;
+  const focus   = account.focus || 'Al iKon Unlimited LLC';
+
+  const prompt = `You are the Social Content Creator Agent for AIKON-OS.
+Platform: ${platform.toUpperCase()} | Account: ${handle}
+Brand focus: ${focus}
+
+RESEARCH REPORT:
+${researchReport}
+
+CREATE a deployable content package:
+- CAPTION: (ready to post, with hashtags, under platform char limit)
+- HOOK: (first line that stops the scroll)
+- CTA: (clear call to action)
+- HASHTAGS: (10-15 relevant tags)
+- BEST POST TIME: (day + time, Eastern)
+- CONTENT TYPE: (video idea / image / text post / reel / thread)
+- VIDEO SCRIPT: (if video — 30-60 sec script, punchy)
+- SPONSORSHIP ANGLE: (1 sentence on what sponsor this content attracts)
+
+Format each field on its own line with the label. Make it ready to deploy — no placeholders.`;
+
+  return await teamLLM(prompt, 'social create');
+}
+
+// ── LLM call helper (reuses ollama config) ────────────────────────────────────
+async function teamLLM(prompt, label) {
+  const model = CONFIG.ollamaModel;
+  try {
+    const body = JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false });
+    return await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
+        path: '/api/chat', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: 120000,
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => { try { resolve(JSON.parse(d).message?.content || 'No response'); } catch(e) { resolve(d); } });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(body); req.end();
+    });
+  } catch(e) {
+    log(`SOCIAL_LLM_ERR [${label}]: ${e.message}`);
+    return `Error: ${e.message}`;
+  }
+}
+
+// ── Deploy: post to platform via API ─────────────────────────────────────────
+async function socialDeploy(platform, pkg, accountKey) {
+  const caption = pkg.caption || pkg.content || pkg;
+
+  if (platform === 'twitter') {
+    const { apiKey, apiSecret, accessToken, accessSecret } = CONFIG.social.twitter;
+    if (!apiKey || !accessToken) return '⚠️  Twitter credentials not set — add TWITTER_API_KEY / TWITTER_ACCESS_TOKEN / TWITTER_ACCESS_SECRET to .env';
+    // Twitter v2 — tweet
+    try {
+      const tweetBody = JSON.stringify({ text: caption.substring(0, 280) });
+      // OAuth 1.0a signature (simplified — requires oauth-1.0a or manual HMAC-SHA1)
+      const authHeader = buildOAuth1Header('POST', 'https://api.twitter.com/2/tweets', {}, apiKey, apiSecret, accessToken, accessSecret);
+      const result = await httpPostRaw('https://api.twitter.com/2/tweets', tweetBody, {
+        'Authorization': authHeader, 'Content-Type': 'application/json',
+      });
+      log(`SOCIAL_DEPLOY [twitter]: ${result.substring(0,100)}`);
+      return `✅ Tweeted: ${caption.substring(0,80)}…`;
+    } catch(e) { return `❌ Twitter post failed: ${e.message}`; }
+  }
+
+  if (platform === 'instagram') {
+    const acc = CONFIG.social.instagram.accounts[accountKey];
+    if (!acc || !acc.accessToken) return `⚠️  Instagram token not set for ${accountKey} — add IG_${accountKey.toUpperCase()}_TOKEN to .env`;
+    // Meta Graph API — text-only post (image upload requires media container flow)
+    return `⚠️  Instagram Graph API requires image/video — caption queued for manual post:\n${caption}`;
+  }
+
+  if (platform === 'tiktok') {
+    const { accessToken } = CONFIG.social.tiktok;
+    if (!accessToken) return '⚠️  TikTok credentials not set — add TIKTOK_ACCESS_TOKEN to .env';
+    // TikTok Content Posting API — video only; text posts not yet available
+    return `⚠️  TikTok requires video upload — script queued for recording:\n${caption}`;
+  }
+
+  return `Unknown platform: ${platform}`;
+}
+
+// ── OAuth 1.0a header builder (Twitter) ──────────────────────────────────────
+function buildOAuth1Header(method, url, params, consumerKey, consumerSecret, token, tokenSecret) {
+  const crypto = require('crypto');
+  const nonce  = crypto.randomBytes(16).toString('hex');
+  const ts     = Math.floor(Date.now() / 1000).toString();
+  const oauthParams = {
+    oauth_consumer_key:     consumerKey,
+    oauth_nonce:            nonce,
+    oauth_signature_method: 'HMAC-SHA1',
+    oauth_timestamp:        ts,
+    oauth_token:            token,
+    oauth_version:          '1.0',
+  };
+  const allParams   = { ...params, ...oauthParams };
+  const sortedKeys  = Object.keys(allParams).sort();
+  const paramStr    = sortedKeys.map(k => `${encodeURIComponent(k)}=${encodeURIComponent(allParams[k])}`).join('&');
+  const baseStr     = `${method}&${encodeURIComponent(url)}&${encodeURIComponent(paramStr)}`;
+  const signingKey  = `${encodeURIComponent(consumerSecret)}&${encodeURIComponent(tokenSecret)}`;
+  const signature   = crypto.createHmac('sha1', signingKey).update(baseStr).digest('base64');
+  oauthParams.oauth_signature = signature;
+  const headerParts = Object.keys(oauthParams).map(k => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`);
+  return 'OAuth ' + headerParts.join(', ');
+}
+
+// ── Raw HTTP POST helper ───────────────────────────────────────────────────────
+async function httpPostRaw(url, body, headers) {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const opts = {
+      hostname: u.hostname, path: u.pathname + u.search, method: 'POST',
+      headers: { 'Content-Length': Buffer.byteLength(body), ...headers },
+    };
+    const req = https.request(opts, res => {
+      let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d));
+    });
+    req.on('error', reject); req.write(body); req.end();
+  });
+}
+
+// ── Full pipeline: research → create → queue/deploy ──────────────────────────
+async function runSocialTeam(platform, accountKey, autoPost = false) {
+  if (!CONFIG.teams.social.active) return '⬜ Social Team is inactive. Use /team social on';
+
+  const label = accountKey ? `${platform}/${accountKey}` : platform;
+  print(`\n📱 Social Team — researching ${label.toUpperCase()}…`);
+  log(`SOCIAL_TEAM_START [${label}]`);
+
+  // Phase 1: Research
+  const research = await socialResearch(platform);
+  print(`\n📊 Research complete. Creating content…`);
+
+  // Phase 2: Create
+  const pkg = await socialCreate(platform, research, accountKey);
+  print(`\n✍️  Content ready.`);
+
+  // Extract caption for queue
+  const captionMatch = pkg.match(/CAPTION:\s*([^\n]+(?:\n(?!(?:HOOK|CTA|HASHTAGS|BEST|CONTENT|VIDEO|SPONSORSHIP):)[^\n]*)*)/i);
+  const caption = captionMatch ? captionMatch[1].trim() : pkg.substring(0, 500);
+
+  const queueEntry = {
+    id:        Date.now(),
+    platform,
+    accountKey: accountKey || null,
+    caption,
+    fullPackage: pkg,
+    research,
+    createdAt: new Date().toISOString(),
+    deployed:  false,
+  };
+  CONFIG.social.postQueue.push(queueEntry);
+  CONFIG.social.lastRun[label] = new Date().toISOString();
+
+  chromaAdd('social', { content: `[Social] ${label}: ${caption.substring(0,200)}`, source: 'social-team' });
+  log(`SOCIAL_TEAM_QUEUED [${label}]: ${caption.substring(0,100)}`);
+
+  let deployResult = '';
+  if (autoPost) {
+    print(`\n🚀 Auto-posting to ${label}…`);
+    deployResult = await socialDeploy(platform, { caption }, accountKey);
+    queueEntry.deployed = true;
+    queueEntry.deployResult = deployResult;
+    log(`SOCIAL_DEPLOY [${label}]: ${deployResult.substring(0,100)}`);
+    await notify(`Social Posted: ${label}`, deployResult.substring(0,200), 'normal');
+  }
+
+  return `📱 Social Team [${label}]:\n\n${pkg}\n${autoPost ? `\n🚀 Deploy: ${deployResult}` : '\n📌 Queued — use /social deploy ' + queueEntry.id + ' to post'}`;
+}
+
+// ── Run all platforms at once ─────────────────────────────────────────────────
+async function runSocialAll(autoPost = false) {
+  const platforms = [
+    { platform: 'tiktok',    accountKey: null },
+    { platform: 'twitter',   accountKey: null },
+    { platform: 'instagram', accountKey: 'alikon_marketing' },
+    { platform: 'instagram', accountKey: 'onairnetwork_inc' },
+    { platform: 'instagram', accountKey: 'tjsdemoreels' },
+  ];
+  const results = [];
+  for (const { platform, accountKey } of platforms) {
+    results.push(await runSocialTeam(platform, accountKey, autoPost));
+  }
+  return results.join('\n\n---\n\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ─── VOICE / WHISPER STT ─────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2753,6 +3006,108 @@ async function handleCommand(input, rl) {
       break;
     }
 
+    // ── /social ───────────────────────────────────────────────────────────────
+    case '/social': {
+      const [sub, ...rest] = args.split(' ');
+      const extra = rest.join(' ');
+
+      if (!sub || sub === 'help') {
+        print(`📱 Social Media Team Commands:
+  /social status          — Show accounts + post queue
+  /social research <platform>  — Run research only (tiktok|twitter|instagram)
+  /social create <platform> [account]  — Research + create content package
+  /social run             — Run all platforms (queues content, no auto-post)
+  /social run auto        — Run all platforms + auto-post where API ready
+  /social run <platform> [account]  — Run one platform
+  /social deploy <id>     — Post queued content by ID
+  /social queue           — Show pending post queue
+  /social clear           — Clear post queue
+Accounts: tiktok=@al.ikon.unlimited | twitter=@Al_ikonunltd
+          instagram: alikon_marketing | onairnetwork_inc | tjsdemoreels`);
+        break;
+      }
+
+      if (sub === 'status') {
+        const q = CONFIG.social.postQueue;
+        const pending = q.filter(p => !p.deployed).length;
+        const deployed = q.filter(p => p.deployed).length;
+        print(`📱 Social Team Status:`);
+        print(`  TikTok   : @al.ikon.unlimited | token: ${CONFIG.social.tiktok.accessToken ? '✅' : '⚠️  not set'}`);
+        print(`  X/Twitter: @Al_ikonunltd | token: ${CONFIG.social.twitter.accessToken ? '✅' : '⚠️  not set'}`);
+        print(`  Instagram: 3 accounts | tokens: ${
+          ['alikon_marketing','onairnetwork_inc','tjsdemoreels']
+            .map(k => `${k}=${CONFIG.social.instagram.accounts[k].accessToken ? '✅' : '⚠️'}`)
+            .join(' | ')}`);
+        print(`  Queue    : ${pending} pending | ${deployed} deployed`);
+        if (CONFIG.social.lastRun && Object.keys(CONFIG.social.lastRun).length) {
+          print(`  Last runs:`);
+          Object.entries(CONFIG.social.lastRun).forEach(([k,v]) => print(`    ${k}: ${v}`));
+        }
+        break;
+      }
+
+      if (sub === 'queue') {
+        const q = CONFIG.social.postQueue.filter(p => !p.deployed);
+        if (!q.length) { print('📭 No pending posts.'); break; }
+        q.forEach(p => print(`  [${p.id}] ${p.platform}${p.accountKey ? '/'+p.accountKey : ''} — ${p.caption.substring(0,80)}…`));
+        break;
+      }
+
+      if (sub === 'clear') {
+        CONFIG.social.postQueue = [];
+        print('🗑️  Post queue cleared.');
+        break;
+      }
+
+      if (sub === 'research') {
+        const platform = extra.trim() || 'tiktok';
+        print(`📊 Researching ${platform}…`);
+        const r = await socialResearch(platform);
+        print(r);
+        break;
+      }
+
+      if (sub === 'deploy') {
+        const id = parseInt(extra.trim(), 10);
+        const item = CONFIG.social.postQueue.find(p => p.id === id);
+        if (!item) { print(`❌ No queued post with ID ${id}`); break; }
+        if (item.deployed) { print(`⚠️  Already deployed.`); break; }
+        print(`🚀 Deploying post ${id} to ${item.platform}…`);
+        const r = await socialDeploy(item.platform, { caption: item.caption }, item.accountKey);
+        item.deployed = true; item.deployResult = r;
+        print(r);
+        await notify(`Social Posted`, r.substring(0,200), 'normal');
+        break;
+      }
+
+      if (sub === 'run') {
+        const autoPost = rest[0] === 'auto';
+        const specificPlatform = (!autoPost && rest[0]) ? rest[0] : null;
+        const specificAccount  = (!autoPost && rest[1]) ? rest[1] : null;
+
+        if (specificPlatform) {
+          const r = await runSocialTeam(specificPlatform, specificAccount, autoPost);
+          print(r);
+        } else {
+          print(`📱 Running Social Team across all platforms${autoPost ? ' (AUTO-POST)' : ' (queue mode)'}…`);
+          const r = await runSocialAll(autoPost);
+          print(r);
+        }
+        break;
+      }
+
+      if (sub === 'create') {
+        const [platform, accountKey] = extra.split(' ');
+        if (!platform) { print('Usage: /social create <platform> [accountKey]'); break; }
+        const r = await runSocialTeam(platform, accountKey || null, false);
+        print(r);
+        break;
+      }
+
+      print(`Unknown social subcommand: ${sub}. Try /social help`);
+      break;
+    }
+
     case '/trader':
     case '/report': {
       print('⏳ Fetching trader...');
@@ -2942,8 +3297,13 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /wake on|off|check   — 👂 Wake word ("Commander" triggers listening)
   /notify <msg>        — 📱 Push notification to your phone (ntfy.sh)
   /notify test         — Test push notification
-  /team                — 🤖 List teams (Trader/Biz/Research/Roblox)
+  /team                — 🤖 List teams (Trader/Biz/Research/Roblox/Social)
   /team <key> <task>   — Run a team on a task
+  /social              — 📱 Social Media Team (TikTok/X/Instagram)
+  /social run          — Research + create content for all platforms
+  /social run auto     — Research + create + auto-post where API ready
+  /social status       — Show accounts, tokens, post queue
+  /social deploy <id>  — Post a queued content package
   /trader, /report     — 📊 Live trader status
   /learn               — 🧠 Run background learn cycle now
   /memory [branch]     — 📚 Show ChromaDB memory
