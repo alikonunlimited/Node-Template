@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.17 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.18 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.17',
+  version:       '3.18',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -1766,6 +1766,132 @@ function startLearner() {
   setInterval(learnCycle, CONFIG.learnInterval);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── SYSTEM OPTIMIZER / CPU GOVERNOR ─────────────────────────────────────────
+// Keeps Thomas fast by throttling Ollama and clearing junk automatically.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Set Ollama process priority to Below Normal (reduces CPU competition) ─────
+async function throttleOllama() {
+  try {
+    // Find ollama PID then set priority class to BelowNormal (0x4000)
+    // wmic is available on all Win10/11 systems
+    const pidRaw = runShell('wmic process where "name=\'ollama.exe\' or name=\'ollama app.exe\' or name=\'ollama runner.exe\'" get ProcessId /VALUE 2>nul');
+    const pids = [...(pidRaw.matchAll(/ProcessId=(\d+)/g))].map(m => m[1]).filter(Boolean);
+    if (!pids.length) { log('GOVERNOR: ollama process not found (may not be running)'); return 'Ollama not running.'; }
+    const results = [];
+    for (const pid of pids) {
+      // PowerShell one-liner: set priority to BelowNormal
+      const r = runShell(`powershell -NoProfile -Command "(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).PriorityClass = 'BelowNormal'"`);
+      results.push(`PID ${pid}: priority → BelowNormal`);
+      log(`GOVERNOR: ollama PID ${pid} throttled to BelowNormal`);
+    }
+    // Also set OLLAMA_NUM_PARALLEL=1 and limit threads via env — takes effect on next ollama restart
+    runShell('setx OLLAMA_NUM_PARALLEL 1 /M 2>nul');
+    runShell('setx OLLAMA_MAX_LOADED_MODELS 1 /M 2>nul');
+    return results.join('\n');
+  } catch(e) { log(`GOVERNOR_ERR: ${e.message}`); return `Error: ${e.message}`; }
+}
+
+// ── Free RAM: empty working sets of background processes ─────────────────────
+async function freeRam() {
+  try {
+    // EmptyWorkingSet on common memory hogs (not critical processes)
+    const hogs = ['SearchIndexer', 'SearchProtocolHost', 'SgrmBroker', 'RuntimeBroker', 'backgroundTaskHost'];
+    for (const name of hogs) {
+      runShell(`powershell -NoProfile -Command "Get-Process '${name}' -ErrorAction SilentlyContinue | ForEach-Object { $_.MinWorkingSet = $_.MinWorkingSet }" 2>nul`);
+    }
+    // Clear DNS cache (frees a little memory + speeds up network)
+    runShell('ipconfig /flushdns >nul 2>&1');
+    // Clear temp files older than 1 day
+    runShell('cmd /c "forfiles /P %TEMP% /D -1 /C \"cmd /c if @isdir==FALSE del /f /q @path\" 2>nul"');
+    log('GOVERNOR: RAM freed, DNS flushed, temp cleaned');
+    return 'RAM freed | DNS flushed | Temp cleaned';
+  } catch(e) { return `RAM free error: ${e.message}`; }
+}
+
+// ── Set power plan to High Performance ───────────────────────────────────────
+async function setPowerPlan() {
+  try {
+    // High Performance GUID — built into Windows
+    runShell('powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>nul');
+    log('GOVERNOR: Power plan → High Performance');
+    return 'Power plan → High Performance';
+  } catch(e) { return `Power plan error: ${e.message}`; }
+}
+
+// ── Kill known non-essential background hogs ──────────────────────────────────
+async function killHogs() {
+  const targets = [
+    'OneDrive', 'Teams', 'SkypeApp', 'YourPhone', 'GameBarFTServer',
+    'GameBar', 'XboxGameBarWidgets', 'SearchApp', 'Cortana'
+  ];
+  const killed = [];
+  for (const name of targets) {
+    const r = runShell(`taskkill /F /IM "${name}.exe" 2>nul`);
+    if (r && !r.includes('not found') && !r.includes('ERROR')) killed.push(name);
+  }
+  if (killed.length) log(`GOVERNOR: killed ${killed.join(', ')}`);
+  return killed.length ? `Killed: ${killed.join(', ')}` : 'No hogs running';
+}
+
+// ── Get current CPU/RAM snapshot ──────────────────────────────────────────────
+function getSystemSnapshot() {
+  try {
+    const cpuRaw = runShell('powershell -NoProfile -Command "Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average"').trim();
+    const ramRaw = runShell('powershell -NoProfile -Command "$os=Get-WmiObject Win32_OperatingSystem; [math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/$os.TotalVisibleMemorySize*100,1)"').trim();
+    const topRaw = runShell('powershell -NoProfile -Command "Get-Process | Sort-Object CPU -Desc | Select-Object -First 5 Name,@{n=\'CPU\';e={[math]::Round($_.CPU,1)}},@{n=\'RAM_MB\';e={[math]::Round($_.WorkingSet/1MB,0)}} | ConvertTo-Csv -NoTypeInformation"').trim();
+    return { cpu: cpuRaw || '?', ram: ramRaw || '?', top: topRaw };
+  } catch(e) { return { cpu: '?', ram: '?', top: e.message }; }
+}
+
+// ── Full optimize run ─────────────────────────────────────────────────────────
+async function runOptimize(verbose = true) {
+  if (verbose) print('⚡ Optimizing Thomas…');
+  const snap1 = getSystemSnapshot();
+  if (verbose) print(`📊 Before — CPU: ${snap1.cpu}% | RAM: ${snap1.ram}%`);
+
+  const r1 = await throttleOllama();
+  if (verbose) print(`🤖 Ollama: ${r1}`);
+
+  const r2 = await setPowerPlan();
+  if (verbose) print(`⚡ Power: ${r2}`);
+
+  const r3 = await killHogs();
+  if (verbose) print(`🗑️  Hogs: ${r3}`);
+
+  const r4 = await freeRam();
+  if (verbose) print(`🧹 RAM: ${r4}`);
+
+  // Brief pause then re-snapshot
+  await new Promise(r => setTimeout(r, 2000));
+  const snap2 = getSystemSnapshot();
+  if (verbose) print(`📊 After  — CPU: ${snap2.cpu}% | RAM: ${snap2.ram}%`);
+
+  const summary = `Optimize complete | CPU: ${snap1.cpu}%→${snap2.cpu}% | RAM: ${snap1.ram}%→${snap2.ram}%`;
+  log(`OPTIMIZE: ${summary}`);
+  await notify('Thomas Optimized', summary, 'normal');
+  return summary;
+}
+
+// ── Auto CPU monitor: runs every 3 min, self-optimizes if CPU > 70% ──────────
+function startCpuMonitor() {
+  setInterval(async () => {
+    try {
+      const snap = getSystemSnapshot();
+      const cpu = parseFloat(snap.cpu);
+      const ram = parseFloat(snap.ram);
+      log(`MONITOR: CPU=${snap.cpu}% RAM=${snap.ram}%`);
+      if (cpu > 70 || ram > 85) {
+        log(`MONITOR: High load detected (CPU ${snap.cpu}% RAM ${snap.ram}%) — auto-optimizing`);
+        print(`\n⚠️  High load: CPU ${snap.cpu}% | RAM ${snap.ram}% — auto-optimizing…`);
+        await runOptimize(false);
+      }
+    } catch(e) { log(`MONITOR_ERR: ${e.message}`); }
+  }, 180000); // every 3 min
+  log('CPU MONITOR: started (3 min interval, auto-optimize at >70% CPU or >85% RAM)');
+}
+
 // ─── BRAIN SYNC ───────────────────────────────────────────────────────────────
 async function syncFromBrain() {
   if (!CONFIG.brainUrl) return;
@@ -3108,6 +3234,44 @@ Accounts: tiktok=@al.ikon.unlimited | twitter=@Al_ikonunltd
       break;
     }
 
+    // ── /optimize ─────────────────────────────────────────────────────────────
+    case '/optimize': {
+      const sub = args.trim();
+      if (sub === 'status' || sub === 'snap') {
+        const s = getSystemSnapshot();
+        print(`📊 System Snapshot:\n  CPU: ${s.cpu}%\n  RAM: ${s.ram}%\n  Top processes:\n${s.top}`);
+        break;
+      }
+      if (sub === 'ollama') {
+        print('🤖 Throttling Ollama…');
+        print(await throttleOllama());
+        break;
+      }
+      if (sub === 'ram') {
+        print('🧹 Freeing RAM…');
+        print(await freeRam());
+        break;
+      }
+      if (sub === 'power') {
+        print('⚡ Setting High Performance power plan…');
+        print(await setPowerPlan());
+        break;
+      }
+      if (sub === 'hogs') {
+        print('🗑️  Killing background hogs…');
+        print(await killHogs());
+        break;
+      }
+      if (sub === 'monitor on') {
+        startCpuMonitor();
+        print('👀 CPU monitor started — auto-optimizes when CPU>70% or RAM>85%');
+        break;
+      }
+      // Default: full optimize
+      await runOptimize(true);
+      break;
+    }
+
     case '/trader':
     case '/report': {
       print('⏳ Fetching trader...');
@@ -3299,6 +3463,11 @@ COMMANDER v${CONFIG.version} COMMANDS:
   /notify test         — Test push notification
   /team                — 🤖 List teams (Trader/Biz/Research/Roblox/Social)
   /team <key> <task>   — Run a team on a task
+  /optimize            — ⚡ Full system optimize (throttle Ollama, free RAM, kill hogs)
+  /optimize status     — 📊 CPU/RAM snapshot + top processes
+  /optimize ollama     — 🤖 Throttle Ollama to BelowNormal priority
+  /optimize ram        — 🧹 Free RAM + clear temp files
+  /optimize monitor on — 👀 Auto-optimize when CPU>70%
   /social              — 📱 Social Media Team (TikTok/X/Instagram)
   /social run          — Research + create content for all platforms
   /social run auto     — Research + create + auto-post where API ready
@@ -3824,6 +3993,7 @@ async function main() {
   startBrainRelay();
   startClaudePoller();
   startLearner();
+  startCpuMonitor(); // auto-optimize when CPU>70% or RAM>85%
 
   // ── PROTOCOL ENGINES ──────────────────────────────────────────────────────
   // S-07: File integrity baseline on startup
