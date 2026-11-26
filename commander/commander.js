@@ -109,12 +109,13 @@ const CONFIG = {
       accessToken: process.env.TIKTOK_ACCESS_TOKEN || '',
     },
     twitter: {
-      handle:   '@Al_ikonunltd',
-      focus:    'Al iKon Unlimited LLC — business, tech, Roblox, trading insights',
-      apiKey:      process.env.TWITTER_API_KEY       || '',
-      apiSecret:   process.env.TWITTER_API_SECRET    || '',
-      accessToken: process.env.TWITTER_ACCESS_TOKEN  || '',
-      accessSecret:process.env.TWITTER_ACCESS_SECRET || '',
+      handle:      '@Al_ikonunltd',
+      focus:       'Al iKon Unlimited LLC — business, tech, Roblox, trading insights',
+      apiKey:      process.env.TWITTER_API_KEY        || '',
+      apiSecret:   process.env.TWITTER_API_SECRET     || '',
+      accessToken: process.env.TWITTER_ACCESS_TOKEN   || '',
+      accessSecret:process.env.TWITTER_ACCESS_SECRET  || '',
+      bearerToken: process.env.TWITTER_BEARER_TOKEN   || '',
     },
     instagram: {
       accounts: {
@@ -3159,7 +3160,7 @@ Accounts: tiktok=@al.ikon.unlimited | twitter=@Al_ikonunltd
         const deployed = q.filter(p => p.deployed).length;
         print(`📱 Social Team Status:`);
         print(`  TikTok   : @al.ikon.unlimited | token: ${CONFIG.social.tiktok.accessToken ? '✅' : '⚠️  not set'}`);
-        print(`  X/Twitter: @Al_ikonunltd | token: ${CONFIG.social.twitter.accessToken ? '✅' : '⚠️  not set'}`);
+        print(`  X/Twitter: @Al_ikonunltd | bearer: ${CONFIG.social.twitter.bearerToken ? '✅' : '⚠️'} | post: ${CONFIG.social.twitter.accessToken && CONFIG.social.twitter.apiKey ? '✅' : '⚠️  not set'}`);
         print(`  Instagram: 3 accounts | tokens: ${
           ['alikon_marketing','onairnetwork_inc','tjsdemoreels']
             .map(k => `${k}=${CONFIG.social.instagram.accounts[k].accessToken ? '✅' : '⚠️'}`)
