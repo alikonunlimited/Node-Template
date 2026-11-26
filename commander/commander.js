@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.18 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.19 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.18',
+  version:       '3.19',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -234,7 +234,7 @@ const CONFIG = {
     aiPeers: [
       { id: 'ollama-local',  type: 'ollama',  url: 'http://localhost:11434', model: 'phi3:mini',       active: true  },
       { id: 'deepseek-local',type: 'ollama',  url: 'http://localhost:11434', model: 'deepseek-r1:7b',  active: false },
-      { id: 'claude-api',    type: 'claude',  url: 'https://api.anthropic.com', model: 'claude-haiku-4-5', active: false },
+      { id: 'claude-api',    type: 'claude',  url: 'https://api.anthropic.com', model: 'claude-haiku-4-5', active: true },
     ],
     // Questions Commander asks itself autonomously
     selfAskTopics: [
@@ -1022,12 +1022,36 @@ Question: ${topic}
 Answer concisely in 3-5 sentences. Focus on actionable insights for Al iKon.`;
 
   let answer = '';
+  let usedClaude = false;
   try {
     const result = await askOllama(prompt, []);
     answer = result.reply || result;
   } catch(e) {
-    log(`SELF-ASK OLLAMA_ERR: ${e.message}`);
-    answer = `[Ollama unavailable: ${e.message}]`;
+    log(`SELF-ASK OLLAMA_ERR: ${e.message} — trying Claude API`);
+    // Escalate to Claude API if Ollama fails or times out
+    const claudeKey = process.env.CLAUDE_API_KEY || '';
+    if (claudeKey) {
+      try {
+        const payload = {
+          model: 'claude-haiku-4-5',
+          max_tokens: 400,
+          system: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.`,
+          messages: [{ role: 'user', content: prompt }],
+        };
+        const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
+          'x-api-key': claudeKey,
+          'anthropic-version': '2023-06-01',
+        });
+        answer = res?.content?.[0]?.text || '[no Claude response]';
+        usedClaude = true;
+        log(`SELF-ASK CLAUDE_FALLBACK: answered`);
+      } catch(ce) {
+        answer = `[All AI unavailable: Ollama=${e.message}, Claude=${ce.message}]`;
+        log(`SELF-ASK ALL_FAIL: ${ce.message}`);
+      }
+    } else {
+      answer = `[Ollama unavailable: ${e.message} — CLAUDE_API_KEY not set for fallback]`;
+    }
   }
 
   // Store in memory + self-ask history
@@ -1578,7 +1602,7 @@ Active Branch: ${BRANCHES[branch]?.name || branch}${chromaContext}`
     { role: 'user', content: prompt }
   ];
 
-  const body = JSON.stringify({ model, messages, stream: false });
+  const body = JSON.stringify({ model, messages, stream: false, keep_alive: 0 });
 
   return new Promise((resolve, reject) => {
     const req = http.request({
@@ -2225,7 +2249,7 @@ async function runTeam(teamKey, task) {
       { role: 'system', content: systemPrompt + contextStr },
       { role: 'user',   content: task }
     ];
-    const body = JSON.stringify({ model, messages, stream: false });
+    const body = JSON.stringify({ model, messages, stream: false, keep_alive: 0 });
     const result = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
@@ -3590,13 +3614,53 @@ SETUP (one-time):
     // ── ASK CLAUDE ──────────────────────────────────────────────────────────────
     case '/claude': {
       if (!args) { print('Usage: /claude <question>'); break; }
-      if (!CONFIG.brainUrl) { print('❌ BRAIN_URL not set — cannot reach Claude'); break; }
       const qId = `q-${Date.now()}`;
-      print(`📡 Sending to Claude [${qId}]... (answer arrives on next heartbeat tick)`);
-      const askUrl = CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask';
+
+      // Path 1: Direct Claude API (instant — preferred when CLAUDE_API_KEY is set)
+      const claudeKey = process.env.CLAUDE_API_KEY || '';
+      if (claudeKey) {
+        print(`🤖 Asking Claude directly [${qId}]...`);
+        try {
+          const kpi = intelUpdateKPI();
+          const systemCtx = `You are advising AIKON-OS Commander (v${CONFIG.version}) for Al iKon (Al iKon Unlimited LLC).
+Current state: Threat=${kpi.threatLevel} | Trader balance=${kpi.traderBalance??'unknown'} | Uptime=${kpi.uptime}
+Active projects: XAU/USD Trader, Silent Santa Roblox, StreamNet, Restaurant Web Agency.
+Be direct, concise, actionable. 3-6 sentences max. This prints in Commander terminal.`;
+          const payload = {
+            model: 'claude-haiku-4-5',
+            max_tokens: 600,
+            system: systemCtx,
+            messages: [{ role: 'user', content: args }],
+          };
+          const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
+            'x-api-key': claudeKey,
+            'anthropic-version': '2023-06-01',
+          });
+          const answer = res?.content?.[0]?.text || JSON.stringify(res).substring(0,300);
+          print(`\n🤖 Claude: ${answer}\n`);
+          log(`CLAUDE-DIRECT [${qId}]: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
+          chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: 'claude_direct' });
+        } catch(e) {
+          print(`❌ Claude API error: ${e.message}`);
+          log(`CLAUDE-DIRECT-ERR [${qId}]: ${e.message}`);
+          // Fall through to Brain relay as backup
+          if (CONFIG.brainUrl) {
+            print(`📡 Falling back to Brain relay [${qId}]...`);
+            try {
+              await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
+              print('  Answer will arrive on next heartbeat tick (~5s)');
+            } catch(be) { print(`❌ Brain relay also failed: ${be.message}`); }
+          }
+        }
+        break;
+      }
+
+      // Path 2: Brain relay (when no direct API key — async, answer on next tick)
+      if (!CONFIG.brainUrl) { print('❌ No CLAUDE_API_KEY and no BRAIN_URL — cannot reach Claude'); break; }
+      print(`📡 Sending to Claude via Brain relay [${qId}]... (answer arrives in ~5s on next heartbeat)`);
       try {
-        await httpPost(askUrl, { question: args, id: qId }, bridgeHeaders());
-        log(`CLAUDE-ASK [${qId}]: ${args}`);
+        await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
+        log(`CLAUDE-ASK-RELAY [${qId}]: ${args}`);
       } catch(e) {
         print(`❌ Failed to reach Brain: ${e.message}`);
       }
