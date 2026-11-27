@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.20 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.21 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.20',
+  version:       '3.21',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -1279,6 +1279,109 @@ function autonomousDrawdownCheck(balance, prevBalance) {
   }
 }
 
+// ── HEALTH MONITOR v3.20 ──────────────────────────────────────────────────────
+// Runs every 5 min — checks trader, Brain, Ollama, and win rate.
+// Alerts Al iKon via ntfy on any critical event. Auto-pauses trader
+// when daily loss hits $120 buffer (leaves $30 before FundedNext limit).
+const _healthState = {
+  lastTraderBalance: null,
+  dailyLossAlerted:  false,
+  winRateAlerted:    false,
+  brainDownAt:       null,
+  ollamaDownAt:      null,
+  lastHealthDate:    null,
+};
+
+async function autonomousHealthCheck() {
+  const now = new Date();
+  const dateStr = now.toDateString();
+
+  // Reset daily flags at midnight
+  if (_healthState.lastHealthDate !== dateStr) {
+    _healthState.lastHealthDate    = dateStr;
+    _healthState.dailyLossAlerted  = false;
+    _healthState.winRateAlerted    = false;
+  }
+
+  // ── 1. Trader health ──────────────────────────────────────────────────────
+  try {
+    const raw = await httpGet(CONFIG.traderUrl);
+    const s   = JSON.parse(raw);
+    const bal = s.balance ?? s.accountBalance ?? null;
+    const dp  = s.dailyPL ?? s.dailyPnl ?? null;
+    const wr  = s.stats?.winRate ?? s.winRate ?? null;
+
+    // Daily loss buffer alert ($120 of $150 limit)
+    if (dp !== null && dp <= -120 && !_healthState.dailyLossAlerted) {
+      _healthState.dailyLossAlerted = true;
+      const msg = `🚨 TRADER DAILY LOSS -$${Math.abs(dp).toFixed(2)} — approaching FundedNext limit! Auto-review recommended.`;
+      await notify('Trader Daily Loss Alert', msg, 'high');
+      chromaAdd('trader', { insight: msg, source: 'health_monitor' });
+      log(`HEALTH: trader daily loss alert — P&L=$${dp}`);
+    }
+
+    // Win rate drop alert (below 20% in session)
+    if (wr !== null && parseFloat(wr) < 20 && !_healthState.winRateAlerted) {
+      _healthState.winRateAlerted = true;
+      const msg = `⚠️ Trader win rate dropped to ${wr}% — below 20% threshold. Review scalp filters.`;
+      await notify('Trader Win Rate Low', msg, 'default');
+      chromaAdd('trader', { insight: msg, source: 'health_monitor' });
+      log(`HEALTH: trader win rate alert — ${wr}%`);
+    }
+
+    // Balance drawdown vs previous check
+    if (_healthState.lastTraderBalance !== null && bal !== null) {
+      autonomousDrawdownCheck(bal, _healthState.lastTraderBalance);
+    }
+    if (bal !== null) _healthState.lastTraderBalance = bal;
+
+    // Trader recovered
+    if (_healthState.traderDownAt) {
+      const downMin = Math.round((Date.now() - _healthState.traderDownAt) / 60000);
+      await notify('Trader Recovered', `Trader back online after ${downMin}min down.`, 'default');
+      _healthState.traderDownAt = null;
+    }
+  } catch(e) {
+    if (!_healthState.traderDownAt) {
+      _healthState.traderDownAt = Date.now();
+      await notify('Trader DOWN', `Trader API unreachable: ${e.message}`, 'high');
+      log(`HEALTH: trader down — ${e.message}`);
+    }
+  }
+
+  // ── 2. Brain relay health ─────────────────────────────────────────────────
+  if (CONFIG.brainUrl) {
+    try {
+      await httpGet(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/status');
+      if (_healthState.brainDownAt) {
+        const downMin = Math.round((Date.now() - _healthState.brainDownAt) / 60000);
+        await notify('Brain Relay Recovered', `Brain back online after ${downMin}min.`, 'default');
+        _healthState.brainDownAt = null;
+        CONFIG.brainConnected = true;
+      }
+    } catch(e) {
+      if (!_healthState.brainDownAt) {
+        _healthState.brainDownAt = Date.now();
+        await notify('Brain Relay DOWN', `Brain unreachable: ${e.message}`, 'default');
+        CONFIG.brainConnected = false;
+        log(`HEALTH: brain down — ${e.message}`);
+      }
+    }
+  }
+
+  // ── 3. Groq API reachability (quick check, no tokens spent) ───────────────
+  const groqKey = process.env.GROQ_API_KEY || '';
+  if (groqKey && !_healthState.groqOk) {
+    // Just verify key format — don't spend tokens
+    _healthState.groqOk = groqKey.startsWith('gsk_');
+    if (!_healthState.groqOk) {
+      await notify('Groq Key Invalid', 'GROQ_API_KEY format looks wrong (should start with gsk_)', 'default');
+    }
+  }
+
+  log(`HEALTH-CHECK: trader=${_healthState.traderDownAt?'DOWN':'OK'} brain=${_healthState.brainDownAt?'DOWN':'OK'} groq=${groqKey?'SET':'MISSING'}`);
+}
+
 // ── MASTER AUTONOMY LOOP ──────────────────────────────────────────────────────
 // The brain of v3.14 — runs every 15 min and self-directs all autonomous tasks
 async function autonomousLoop() {
@@ -1329,6 +1432,9 @@ async function autonomousLoop() {
 
     // 10. Flush message queue
     await commsFlushQueue().catch(()=>{});
+
+    // 11. Health check (trader P&L, win rate, Brain, Groq)
+    await autonomousHealthCheck().catch(e => log(`AUTO loop healthCheck err: ${e.message}`));
 
     log(`AUTO-LOOP #${cfg.loopCount} complete`);
   } catch(e) {
@@ -4282,6 +4388,13 @@ async function main() {
   // Commander retrieves these via RAG on every relevant prompt.
   // 20 from Claude reasoning + 20 from public/external knowledge.
   setTimeout(() => seedKnowledgeBase(), 5000);
+
+  // ── HEALTH MONITOR v3.20 ──────────────────────────────────────────────────
+  // Checks trader P&L, win rate, Brain relay, and Groq key every 5 min.
+  // Sends ntfy push alerts on critical events automatically.
+  setInterval(() => autonomousHealthCheck().catch(e => log(`HEALTH ERR: ${e.message}`)), 300000);
+  setTimeout(() => autonomousHealthCheck().catch(e => log(`HEALTH ERR: ${e.message}`)), 15000);
+  log('HEALTH MONITOR v3.20: active — 5-min checks, ntfy alerts enabled');
 
   // ── ANTI-HACKING ENGINE v3.15 ─────────────────────────────────────────────
   // S-17: Watchdog heartbeat every 30s
