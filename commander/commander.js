@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.26 — /claude routes through branch teams with full procedures:
+// AIKON-OS Commander v3.27 — runTeam uses askAI fallback chain, no hard Ollama dependency:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.26',
+  version:       '3.27',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -2392,30 +2392,15 @@ async function runTeam(teamKey, task) {
     roblox:   `You are the Roblox Team for AIKON-OS. You manage Silent Santa, Magic Moments, Castle Kings, Dead to Dawn, Lemonade Rush, and Stick Fights. You optimize game mechanics, monetization, and updates.`,
   }[teamKey] || `You are the ${team.name} for AIKON-OS.`;
 
-  const model = (teamKey === 'trader' || teamKey === 'biz') && CONFIG.deepseekReady
-    ? CONFIG.deepseekModel : CONFIG.ollamaModel;
-
   try {
-    const messages = [
-      { role: 'system', content: systemPrompt + contextStr },
-      { role: 'user',   content: task }
-    ];
-    const body = JSON.stringify({ model, messages, stream: false, keep_alive: 0 });
-    const result = await new Promise((resolve, reject) => {
-      const req = http.request({
-        hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
-        path: '/api/chat', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 120000
-      }, res => {
-        let d = '';
-        res.on('data', c => d += c);
-        res.on('end', () => { try { resolve(JSON.parse(d).message?.content || 'No response'); } catch(e) { resolve(d); } });
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-      req.write(body); req.end();
-    });
+    // Use askAI() so the full fallback chain applies:
+    // Phi-3 (fast) → DeepSeek (heavy, if ready) → Groq → OpenRouter → Gemini
+    // This means a team never hard-fails due to one model being slow or unloaded.
+    const { text: result, provider } = await askAI(task, systemPrompt + contextStr, 700);
+
+    if (!result || result === '[All AI providers unavailable]') {
+      return `❌ ${team.name}: all AI providers unavailable`;
+    }
 
     // Check if approval needed
     const needsApproval = /\b(deploy|send|post|publish|buy|sell|spend|charge|delete|remove|create account|wire)\b/i.test(result);
@@ -2427,8 +2412,8 @@ async function runTeam(teamKey, task) {
     }
 
     chromaAdd(team.branch, { content: `[${team.name}] Task: ${task} → ${result.substring(0,200)}`, source: 'team' });
-    log(`TEAM [${teamKey}/${model}]: ${result.substring(0,200)}`);
-    return `🤖 ${team.name} [${model}]:\n${result}`;
+    log(`TEAM [${teamKey}/${provider}]: ${result.substring(0,200)}`);
+    return `🤖 ${team.name} [${provider}]:\n${result}`;
   } catch(e) {
     log(`TEAM_ERR [${teamKey}]: ${e.message}`);
     return `❌ ${team.name} error: ${e.message}`;
