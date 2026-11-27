@@ -40,7 +40,7 @@
     <Priority>7</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
-      <Count>999</Count>
+      <Count>2</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
