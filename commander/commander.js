@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.19 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.20 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.19',
+  version:       '3.20',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -234,7 +234,7 @@ const CONFIG = {
     aiPeers: [
       { id: 'ollama-local',  type: 'ollama',  url: 'http://localhost:11434', model: 'phi3:mini',       active: true  },
       { id: 'deepseek-local',type: 'ollama',  url: 'http://localhost:11434', model: 'deepseek-r1:7b',  active: false },
-      { id: 'claude-api',    type: 'claude',  url: 'https://api.anthropic.com', model: 'claude-haiku-4-5', active: true },
+      { id: 'claude-api',    type: 'groq',    url: 'https://api.groq.com',       model: 'llama-3.1-8b-instant', active: true },
     ],
     // Questions Commander asks itself autonomously
     selfAskTopics: [
@@ -1072,30 +1072,31 @@ Answer concisely in 3-5 sentences. Focus on actionable insights for Al iKon.`;
     const result = await askOllama(prompt, []);
     answer = result.reply || result;
   } catch(e) {
-    log(`SELF-ASK OLLAMA_ERR: ${e.message} — trying Claude API`);
-    // Escalate to Claude API if Ollama fails or times out
-    const claudeKey = process.env.CLAUDE_API_KEY || '';
-    if (claudeKey) {
+    log(`SELF-ASK OLLAMA_ERR: ${e.message} — trying Groq API`);
+    // Escalate to Groq API if Ollama fails or times out
+    const groqKey = process.env.GROQ_API_KEY || '';
+    if (groqKey) {
       try {
         const payload = {
-          model: 'claude-haiku-4-5',
+          model: 'llama-3.1-8b-instant',
           max_tokens: 400,
-          system: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.`,
-          messages: [{ role: 'user', content: prompt }],
+          messages: [
+            { role: 'system', content: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.` },
+            { role: 'user', content: prompt },
+          ],
         };
-        const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
-          'x-api-key': claudeKey,
-          'anthropic-version': '2023-06-01',
+        const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', payload, {
+          'Authorization': `Bearer ${groqKey}`,
         });
-        answer = res?.content?.[0]?.text || '[no Claude response]';
+        answer = res?.choices?.[0]?.message?.content || '[no Groq response]';
         usedClaude = true;
-        log(`SELF-ASK CLAUDE_FALLBACK: answered`);
+        log(`SELF-ASK GROQ_FALLBACK: answered`);
       } catch(ce) {
-        answer = `[All AI unavailable: Ollama=${e.message}, Claude=${ce.message}]`;
+        answer = `[All AI unavailable: Ollama=${e.message}, Groq=${ce.message}]`;
         log(`SELF-ASK ALL_FAIL: ${ce.message}`);
       }
     } else {
-      answer = `[Ollama unavailable: ${e.message} — CLAUDE_API_KEY not set for fallback]`;
+      answer = `[Ollama unavailable: ${e.message} — GROQ_API_KEY not set for fallback]`;
     }
   }
 
@@ -1135,21 +1136,22 @@ async function queryAIPeer(peerId, question) {
       chromaAdd('aikon_os', { insight: `[AI-PEER:${peerId}] Q:${question.substring(0,80)} A:${answer.substring(0,200)}`, source: 'ai_peer' });
       return { peer: peerId, model: peer.model, answer };
     }
-    if (peer.type === 'claude') {
-      const claudeKey = process.env.CLAUDE_API_KEY || '';
-      if (!claudeKey) return { error: 'CLAUDE_API_KEY not set' };
+    if (peer.type === 'groq') {
+      const groqKey = process.env.GROQ_API_KEY || '';
+      if (!groqKey) return { error: 'GROQ_API_KEY not set' };
       const payload = {
         model: peer.model,
         max_tokens: 400,
-        system: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.`,
-        messages: [{ role: 'user', content: question }],
+        messages: [
+          { role: 'system', content: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.` },
+          { role: 'user', content: question },
+        ],
       };
-      const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
-        'x-api-key': claudeKey,
-        'anthropic-version': '2023-06-01',
+      const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', payload, {
+        'Authorization': `Bearer ${groqKey}`,
       });
-      const answer = res?.content?.[0]?.text || JSON.stringify(res).substring(0,200);
-      chromaAdd('aikon_os', { insight: `[AI-PEER:claude] Q:${question.substring(0,80)} A:${answer.substring(0,200)}`, source: 'ai_peer_claude' });
+      const answer = res?.choices?.[0]?.message?.content || JSON.stringify(res).substring(0,200);
+      chromaAdd('aikon_os', { insight: `[AI-PEER:groq] Q:${question.substring(0,80)} A:${answer.substring(0,200)}`, source: 'ai_peer_groq' });
       return { peer: peerId, model: peer.model, answer };
     }
   } catch(e) {
@@ -3661,10 +3663,10 @@ SETUP (one-time):
       if (!args) { print('Usage: /claude <question>'); break; }
       const qId = `q-${Date.now()}`;
 
-      // Path 1: Direct Claude API (instant — preferred when CLAUDE_API_KEY is set)
-      const claudeKey = process.env.CLAUDE_API_KEY || '';
-      if (claudeKey) {
-        print(`🤖 Asking Claude directly [${qId}]...`);
+      // Path 1: Direct Groq API (instant — free, preferred when GROQ_API_KEY is set)
+      const groqKey = process.env.GROQ_API_KEY || '';
+      if (groqKey) {
+        print(`🤖 Asking Groq (Llama 3.1) directly [${qId}]...`);
         try {
           const kpi = intelUpdateKPI();
           const systemCtx = `You are advising AIKON-OS Commander (v${CONFIG.version}) for Al iKon (Al iKon Unlimited LLC).
@@ -3672,22 +3674,23 @@ Current state: Threat=${kpi.threatLevel} | Trader balance=${kpi.traderBalance??'
 Active projects: XAU/USD Trader, Silent Santa Roblox, StreamNet, Restaurant Web Agency.
 Be direct, concise, actionable. 3-6 sentences max. This prints in Commander terminal.`;
           const payload = {
-            model: 'claude-haiku-4-5',
+            model: 'llama-3.1-8b-instant',
             max_tokens: 600,
-            system: systemCtx,
-            messages: [{ role: 'user', content: args }],
+            messages: [
+              { role: 'system', content: systemCtx },
+              { role: 'user', content: args },
+            ],
           };
-          const res = await httpPost('https://api.anthropic.com/v1/messages', payload, {
-            'x-api-key': claudeKey,
-            'anthropic-version': '2023-06-01',
+          const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', payload, {
+            'Authorization': `Bearer ${groqKey}`,
           });
-          const answer = res?.content?.[0]?.text || JSON.stringify(res).substring(0,300);
-          print(`\n🤖 Claude: ${answer}\n`);
-          log(`CLAUDE-DIRECT [${qId}]: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
-          chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: 'claude_direct' });
+          const answer = res?.choices?.[0]?.message?.content || JSON.stringify(res).substring(0,300);
+          print(`\n🤖 Groq: ${answer}\n`);
+          log(`GROQ-DIRECT [${qId}]: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
+          chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: 'groq_direct' });
         } catch(e) {
-          print(`❌ Claude API error: ${e.message}`);
-          log(`CLAUDE-DIRECT-ERR [${qId}]: ${e.message}`);
+          print(`❌ Groq API error: ${e.message}`);
+          log(`GROQ-DIRECT-ERR [${qId}]: ${e.message}`);
           // Fall through to Brain relay as backup
           if (CONFIG.brainUrl) {
             print(`📡 Falling back to Brain relay [${qId}]...`);
@@ -3700,8 +3703,8 @@ Be direct, concise, actionable. 3-6 sentences max. This prints in Commander term
         break;
       }
 
-      // Path 2: Brain relay (when no direct API key — async, answer on next tick)
-      if (!CONFIG.brainUrl) { print('❌ No CLAUDE_API_KEY and no BRAIN_URL — cannot reach Claude'); break; }
+      // Path 2: Brain relay (when no Groq key — async, answer on next tick)
+      if (!CONFIG.brainUrl) { print('❌ No GROQ_API_KEY and no BRAIN_URL — cannot reach AI'); break; }
       print(`📡 Sending to Claude via Brain relay [${qId}]... (answer arrives in ~5s on next heartbeat)`);
       try {
         await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
