@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.23 — Movement Learning: observes Al iKon activity, learns patterns:
+// AIKON-OS Commander v3.24 — Tiered Ollama: Phi-3 fast path, DeepSeek heavy reasoning only:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.23',
+  version:       '3.24',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -4349,14 +4349,30 @@ async function askAI(userPrompt, systemPrompt = '', maxTokens = 500) {
   const sys = systemPrompt || `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-6 sentences.`;
   const errors = [];
 
-  // ── 1. Ollama (local) ──────────────────────────────────────────────────────
+  // ── 1a. Phi-3 Mini (local, fast — always first) ───────────────────────────
   try {
-    const result = await askOllama(userPrompt, []);
+    const result = await askOllama(userPrompt, [], CONFIG.ollamaModel);
     const text = result.reply || result;
     if (text && !text.includes('timeout') && !text.includes('unavailable')) {
-      return { text, provider: 'ollama' };
+      return { text, provider: 'ollama/phi3' };
     }
-  } catch(e) { errors.push(`ollama: ${e.message}`); }
+  } catch(e) { errors.push(`ollama/phi3: ${e.message}`); }
+
+  // ── 1b. DeepSeek R1 (local, heavy — only for deep reasoning tasks) ────────
+  // Used when: analyze, plan, strategy, evaluate, research, forecast, decide
+  // RAM cap: DeepSeek loads only on demand; unloaded after inference (keep_alive:0)
+  const heavyKeywords = ['analyze','why','how should','plan','strategy','compare',
+    'evaluate','opportunity','should i','what if','research','forecast','decide','recommend'];
+  const isHeavy = heavyKeywords.some(k => userPrompt.toLowerCase().includes(k)) || userPrompt.length > 300;
+  if (isHeavy && CONFIG.deepseekReady) {
+    try {
+      const result = await askOllama(userPrompt, [], CONFIG.deepseekModel);
+      const text = result.reply || result;
+      if (text && !text.includes('timeout') && !text.includes('unavailable')) {
+        return { text, provider: 'ollama/deepseek' };
+      }
+    } catch(e) { errors.push(`ollama/deepseek: ${e.message}`); }
+  }
 
   // ── 2. Groq (free, fastest cloud) ─────────────────────────────────────────
   const groqKey = process.env.GROQ_API_KEY || '';
