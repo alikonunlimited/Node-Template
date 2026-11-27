@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.25 — Grounded /claude: gather→reason→answer, no hallucination:
+// AIKON-OS Commander v3.26 — /claude routes through branch teams with full procedures:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.25',
+  version:       '3.26',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -3770,78 +3770,89 @@ SETUP (one-time):
     case '/claude': {
       if (!args) { print('Usage: /claude <question>'); break; }
       const qId = `q-${Date.now()}`;
-      print(`🤖 Thinking [${qId}]...`);
+      print(`🤖 Routing [${qId}]...`);
 
       try {
-        // ── STEP 1: GATHER — pull everything Commander actually knows ──────────
-        const branch   = detectBranch(args);
-        const ragHits  = chromaQuery(branch, args, 5);
-        const kpi      = intelUpdateKPI();
-        const mvActive = movementIsActive();
-        const mvPeak   = movementIsLikelyAwake();
-        const patterns = CONFIG.movement.patterns;
+        // ── STEP 1: DETECT — which branch and team owns this question? ─────────
+        // Branch → team mapping (branch key → CONFIG.teams key)
+        const branchToTeam = {
+          trader:        'trader',
+          roblox:        'roblox',
+          agency:        'biz',
+          opportunities: 'biz',
+          social:        'social',
+          aikon_os:      null,  // general Commander question — no specific team
+        };
+        const branch  = detectBranch(args);
+        const teamKey = branchToTeam[branch] ?? null;
+        const team    = teamKey ? CONFIG.teams[teamKey] : null;
 
-        // Live trader data if relevant
-        let traderCtx = '';
-        if (/trader|xau|gold|trade|position|balance|p&l|win|loss/i.test(args)) {
-          try {
-            const td = await httpGet(`${CONFIG.traderUrl}/status`);
-            traderCtx = `Trader live: balance=$${td?.balance??'?'} | P&L today=$${td?.dailyPL??'?'} | win rate=${td?.winRate??'?'}% | open positions=${td?.openPositions??0}`;
-          } catch(e) { traderCtx = 'Trader: unreachable right now'; }
+        log(`CLAUDE-ROUTE [${qId}]: branch=${branch} team=${teamKey??'general'}`);
+
+        // ── STEP 2: TEAM ROUTE — let the proper team run its full procedure ────
+        // runTeam() already: pulls ChromaDB, injects system prompt, picks model,
+        // detects approval-needed actions, logs result, stores back to ChromaDB.
+        if (team && team.active) {
+          print(`  → ${team.name} handling this...`);
+          const result = await runTeam(teamKey, args);
+          print(`\n${result}\n`);
+          log(`CLAUDE-TEAM [${qId}/${teamKey}]: done`);
+          movementRecord('claude_cmd', `[${teamKey}] ${args.substring(0,60)}`);
+          break;
         }
 
-        // ── STEP 2: ASSESS — does Commander already have a complete answer? ───
+        // ── STEP 3: GENERAL — no team owns it; gather all context manually ────
+        print(`  → General question (no team owner). Gathering context...`);
+        const ragHits  = chromaQuery(branch, args, 5);
+        const kpi      = intelUpdateKPI();
+        const patterns = CONFIG.movement.patterns;
+
         const ragSummary = ragHits.length
-          ? ragHits.map((h,i) => `[${i+1}] ${h.content}`).join('\n')
+          ? ragHits.map((h,i) => `[${i+1}] ${h.content || h.insight}`).join('\n')
           : 'No relevant memory found.';
 
-        // If RAG has strong hits and no live data needed, answer directly
-        const hasStrongRAG = ragHits.length >= 3 && !traderCtx;
+        // If strong RAG hit — answer from memory, skip AI
+        const hasStrongRAG = ragHits.length >= 3;
         if (hasStrongRAG) {
-          // Compose answer purely from known context — no AI hallucination risk
-          const directAnswer = ragHits.slice(0,3).map(h => h.content).join(' | ');
+          const directAnswer = ragHits.slice(0,3).map(h => h.content || h.insight).join(' | ');
           if (directAnswer.length > 80) {
             print(`\n🧠 [memory]: ${directAnswer.substring(0,500)}\n`);
-            log(`AI-DIRECT [${qId}] via memory-RAG: Q=${args.substring(0,80)}`);
-            chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${directAnswer.substring(0,200)}`, source: 'memory_rag' });
+            log(`CLAUDE-MEM [${qId}]: answered from RAG`);
+            movementRecord('claude_cmd', `[memory] ${args.substring(0,60)}`);
             break;
           }
         }
 
-        // ── STEP 3: REASON — build a focused, grounded prompt for AI ─────────
-        // Commander does NOT send raw questions. It sends what it knows + what it needs.
+        // ── STEP 4: GROUNDED AI — context-first, no hallucination ─────────────
         const groundedPrompt = `
-You are Commander's reasoning engine for Al iKon (Al iKon Unlimited LLC).
-Commander has gathered the following verified context. Reason over it — do NOT add unverified facts.
+You are Commander's general reasoning engine for Al iKon (Al iKon Unlimited LLC).
+Reason over the verified context below. Do NOT add unverified facts.
 
 QUESTION: ${args}
 
 WHAT COMMANDER KNOWS:
 ${ragSummary}
-${traderCtx ? `\nLIVE SYSTEM DATA:\n${traderCtx}` : ''}
 
 SYSTEM STATE:
 - Commander v${CONFIG.version} | Threat: ${kpi.threatLevel} | Uptime: ${kpi.uptime}
-- Al iKon presence: ${mvActive ? 'ACTIVE (seen recently)' : 'AWAY'}
-- Peak activity window: ${patterns.peakHours ? patterns.peakHours.map(h=>`${h}:00`).join(', ') : 'learning...'}
+- Al iKon presence: ${movementIsActive() ? 'ACTIVE' : 'AWAY'}
+- Peak hours: ${patterns.peakHours ? patterns.peakHours.map(h=>`${h}:00`).join(', ') : 'learning'}
 - Active projects: XAU/USD Trader, Silent Santa (Roblox), Restaurant Web Agency
 
 INSTRUCTIONS:
-- Answer ONLY from the context above. If the context is insufficient, say exactly what is missing.
-- Do NOT invent strategy, numbers, or facts not present above.
-- Be direct and concise. 3-5 sentences. Terminal output — no markdown.
-- If you cannot give a complete answer, say so and state what data would complete it.`.trim();
+- Answer ONLY from the context above.
+- If context is insufficient, state exactly what is missing — do not guess.
+- 3-5 sentences. Plain text, no markdown. Terminal output.`.trim();
 
-        // ── STEP 4: AI CALL — only now, with grounded context ─────────────────
         const { text: answer, provider } = await askAI(groundedPrompt, '', 700);
-
         print(`\n🤖 [${provider}]: ${answer}\n`);
-        log(`AI-DIRECT [${qId}] via ${provider}: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
+        log(`CLAUDE-AI [${qId}/${provider}]: Q=${args.substring(0,80)}`);
         chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: `ai_${provider}` });
+        movementRecord('claude_cmd', `[${provider}] ${args.substring(0,60)}`);
 
       } catch(e) {
         print(`❌ AI error: ${e.message}`);
-        log(`AI-DIRECT-ERR [${qId}]: ${e.message}`);
+        log(`CLAUDE-ERR [${qId}]: ${e.message}`);
         if (CONFIG.brainUrl) {
           print(`📡 Falling back to Brain relay [${qId}]...`);
           try {
