@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.21 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.22 — Anti-Hacking Security Layer S-11–S-20:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.21',
+  version:       '3.22',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -1072,31 +1072,16 @@ Answer concisely in 3-5 sentences. Focus on actionable insights for Al iKon.`;
     const result = await askOllama(prompt, []);
     answer = result.reply || result;
   } catch(e) {
-    log(`SELF-ASK OLLAMA_ERR: ${e.message} — trying Groq API`);
-    // Escalate to Groq API if Ollama fails or times out
-    const groqKey = process.env.GROQ_API_KEY || '';
-    if (groqKey) {
-      try {
-        const payload = {
-          model: 'llama-3.1-8b-instant',
-          max_tokens: 400,
-          messages: [
-            { role: 'system', content: `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-5 sentences.` },
-            { role: 'user', content: prompt },
-          ],
-        };
-        const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', payload, {
-          'Authorization': `Bearer ${groqKey}`,
-        });
-        answer = res?.choices?.[0]?.message?.content || '[no Groq response]';
-        usedClaude = true;
-        log(`SELF-ASK GROQ_FALLBACK: answered`);
-      } catch(ce) {
-        answer = `[All AI unavailable: Ollama=${e.message}, Groq=${ce.message}]`;
-        log(`SELF-ASK ALL_FAIL: ${ce.message}`);
-      }
-    } else {
-      answer = `[Ollama unavailable: ${e.message} — GROQ_API_KEY not set for fallback]`;
+    log(`SELF-ASK OLLAMA_ERR: ${e.message} — trying fallback chain`);
+    // Escalate through provider chain (Groq → OpenRouter → Gemini)
+    try {
+      const { text, provider } = await askAI(prompt);
+      answer = text;
+      usedClaude = provider !== 'ollama' && provider !== 'none';
+      log(`SELF-ASK FALLBACK: answered via ${provider}`);
+    } catch(ce) {
+      answer = `[All AI unavailable: Ollama=${e.message}, chain=${ce.message}]`;
+      log(`SELF-ASK ALL_FAIL: ${ce.message}`);
     }
   }
 
@@ -3769,48 +3754,32 @@ SETUP (one-time):
       if (!args) { print('Usage: /claude <question>'); break; }
       const qId = `q-${Date.now()}`;
 
-      // Path 1: Direct Groq API (instant — free, preferred when GROQ_API_KEY is set)
-      const groqKey = process.env.GROQ_API_KEY || '';
-      if (groqKey) {
-        print(`🤖 Asking Groq (Llama 3.1) directly [${qId}]...`);
-        try {
-          const kpi = intelUpdateKPI();
-          const systemCtx = `You are advising AIKON-OS Commander (v${CONFIG.version}) for Al iKon (Al iKon Unlimited LLC).
+      // Path 1: askAI chain (Ollama → Groq → OpenRouter → Gemini, auto-fallback)
+      print(`🤖 Asking AI [${qId}]...`);
+      try {
+        const kpi = intelUpdateKPI();
+        const systemCtx = `You are advising AIKON-OS Commander (v${CONFIG.version}) for Al iKon (Al iKon Unlimited LLC).
 Current state: Threat=${kpi.threatLevel} | Trader balance=${kpi.traderBalance??'unknown'} | Uptime=${kpi.uptime}
 Active projects: XAU/USD Trader, Silent Santa Roblox, StreamNet, Restaurant Web Agency.
 Be direct, concise, actionable. 3-6 sentences max. This prints in Commander terminal.`;
-          const payload = {
-            model: 'llama-3.1-8b-instant',
-            max_tokens: 600,
-            messages: [
-              { role: 'system', content: systemCtx },
-              { role: 'user', content: args },
-            ],
-          };
-          const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', payload, {
-            'Authorization': `Bearer ${groqKey}`,
-          });
-          const answer = res?.choices?.[0]?.message?.content || JSON.stringify(res).substring(0,300);
-          print(`\n🤖 Groq: ${answer}\n`);
-          log(`GROQ-DIRECT [${qId}]: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
-          chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: 'groq_direct' });
-        } catch(e) {
-          print(`❌ Groq API error: ${e.message}`);
-          log(`GROQ-DIRECT-ERR [${qId}]: ${e.message}`);
-          // Fall through to Brain relay as backup
-          if (CONFIG.brainUrl) {
-            print(`📡 Falling back to Brain relay [${qId}]...`);
-            try {
-              await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
-              print('  Answer will arrive on next heartbeat tick (~5s)');
-            } catch(be) { print(`❌ Brain relay also failed: ${be.message}`); }
-          }
+        const { text: answer, provider } = await askAI(args, systemCtx, 600);
+        print(`\n🤖 [${provider}]: ${answer}\n`);
+        log(`AI-DIRECT [${qId}] via ${provider}: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
+        chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: `ai_${provider}` });
+      } catch(e) {
+        print(`❌ AI error: ${e.message}`);
+        log(`AI-DIRECT-ERR [${qId}]: ${e.message}`);
+        if (CONFIG.brainUrl) {
+          print(`📡 Falling back to Brain relay [${qId}]...`);
+          try {
+            await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
+            print('  Answer will arrive on next heartbeat tick (~5s)');
+          } catch(be) { print(`❌ Brain relay also failed: ${be.message}`); }
         }
-        break;
       }
-
-      // Path 2: Brain relay (when no Groq key — async, answer on next tick)
-      if (!CONFIG.brainUrl) { print('❌ No GROQ_API_KEY and no BRAIN_URL — cannot reach AI'); break; }
+      break;
+      // Path 2: Brain relay fallback (kept for legacy — normally askAI chain handles everything)
+      if (!CONFIG.brainUrl) { print('❌ No AI providers available and no BRAIN_URL'); break; }
       print(`📡 Sending to Claude via Brain relay [${qId}]... (answer arrives in ~5s on next heartbeat)`);
       try {
         await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
@@ -4235,6 +4204,150 @@ async function backgroundStartup() {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
+// ─── UNIVERSAL AI CALL v3.21 — provider fallback chain ───────────────────────
+// askAI(prompt, systemPrompt, maxTokens) tries providers in order:
+//   1. Ollama (local, free, fastest — phi3:mini)
+//   2. Groq   (free cloud, 14k req/day — llama-3.1-8b-instant)
+//   3. OpenRouter (free models — meta-llama/llama-3.1-8b-instruct:free)
+//   4. Gemini (free tier — gemini-1.5-flash via REST)
+// Falls back silently — Commander never dies because one provider is down.
+// ═══════════════════════════════════════════════════════════════════════════════
+async function askAI(userPrompt, systemPrompt = '', maxTokens = 500) {
+  const sys = systemPrompt || `You are advising AIKON-OS Commander for Al iKon (Al iKon Unlimited LLC). Be concise, actionable, 3-6 sentences.`;
+  const errors = [];
+
+  // ── 1. Ollama (local) ──────────────────────────────────────────────────────
+  try {
+    const result = await askOllama(userPrompt, []);
+    const text = result.reply || result;
+    if (text && !text.includes('timeout') && !text.includes('unavailable')) {
+      return { text, provider: 'ollama' };
+    }
+  } catch(e) { errors.push(`ollama: ${e.message}`); }
+
+  // ── 2. Groq (free, fastest cloud) ─────────────────────────────────────────
+  const groqKey = process.env.GROQ_API_KEY || '';
+  if (groqKey) {
+    try {
+      const res = await httpPost('https://api.groq.com/openai/v1/chat/completions', {
+        model: 'llama-3.1-8b-instant',
+        max_tokens: maxTokens,
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: userPrompt }],
+      }, { 'Authorization': `Bearer ${groqKey}` });
+      const text = res?.choices?.[0]?.message?.content;
+      if (text) return { text, provider: 'groq' };
+    } catch(e) { errors.push(`groq: ${e.message}`); }
+  }
+
+  // ── 3. OpenRouter (free models) ───────────────────────────────────────────
+  const orKey = process.env.OPENROUTER_API_KEY || '';
+  if (orKey) {
+    try {
+      const res = await httpPost('https://openrouter.ai/api/v1/chat/completions', {
+        model: 'meta-llama/llama-3.1-8b-instruct:free',
+        max_tokens: maxTokens,
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: userPrompt }],
+      }, { 'Authorization': `Bearer ${orKey}`, 'HTTP-Referer': 'https://github.com/alikonunlimited', 'X-Title': 'AIKON-OS Commander' });
+      const text = res?.choices?.[0]?.message?.content;
+      if (text) return { text, provider: 'openrouter' };
+    } catch(e) { errors.push(`openrouter: ${e.message}`); }
+  }
+
+  // ── 4. Gemini (Google AI Studio free tier) ────────────────────────────────
+  const gemKey = process.env.GEMINI_API_KEY || '';
+  if (gemKey) {
+    try {
+      const res = await httpPost(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${gemKey}`,
+        { contents: [{ parts: [{ text: `${sys}\n\n${userPrompt}` }] }], generationConfig: { maxOutputTokens: maxTokens } },
+        {}
+      );
+      const text = res?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) return { text, provider: 'gemini' };
+    } catch(e) { errors.push(`gemini: ${e.message}`); }
+  }
+
+  // All providers failed
+  log(`ASK-AI ALL_FAIL: ${errors.join(' | ')}`);
+  return { text: `[All AI providers unavailable: ${errors.join(', ')}]`, provider: 'none' };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── PHONE LISTENER v3.21 ────────────────────────────────────────────────────
+// Permanent background poll of ntfy — receives commands from Al iKon's phone.
+// Commander polls /json?poll=1 every 8s, executes any slash command received.
+// Approval flow: Commander pushes "ACTION NEEDED" → Al iKon replies /approve ID
+// or any natural language → Commander routes to askAI and pushes answer back.
+// Uses NTFY_CMD_TOPIC (default: NTFY_TOPIC + "-cmd") to separate inbound from outbound.
+// ═══════════════════════════════════════════════════════════════════════════════
+function startPhoneListener(rl) {
+  const topic = process.env.NTFY_CMD_TOPIC || (CONFIG.ntfyTopic ? CONFIG.ntfyTopic + '-cmd' : '');
+  if (!topic) {
+    log('PHONE-LISTENER: no NTFY_TOPIC set — skipping. Set NTFY_TOPIC in .env to enable.');
+    return;
+  }
+
+  let lastTs = Math.floor(Date.now() / 1000);
+  log(`PHONE-LISTENER: active on ntfy topic "${topic}" — polling every 8s`);
+  print(`📱 Phone listener active — send commands to ntfy topic: ${topic}`);
+
+  async function poll() {
+    try {
+      const raw = await new Promise((resolve, reject) => {
+        const req = https.get(
+          `https://ntfy.sh/${topic}/json?poll=1&since=${lastTs}`,
+          { headers: { 'User-Agent': 'AIKON-Commander/3.21' }, timeout: 6000 },
+          r => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d)); }
+        );
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('poll timeout')); });
+      });
+
+      const lines = raw.trim().split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line);
+          if (msg.event !== 'message' || !msg.message) continue;
+          if ((msg.time || 0) <= lastTs) continue;
+          lastTs = msg.time;
+
+          const text = msg.message.trim();
+          log(`PHONE: received "${text.substring(0, 80)}"`);
+          print(`\n📱 Phone → "${text}"`);
+
+          if (text.startsWith('/')) {
+            // Slash command — execute directly
+            await handleCommand(text, rl).catch(e => log(`PHONE CMD ERR: ${e.message}`));
+          } else {
+            // Natural language — route to askAI, push answer back to phone
+            const { text: answer, provider } = await askAI(text);
+            print(`\n🤖 [${provider}]: ${answer}\n`);
+            remember('user', `[phone] ${text}`);
+            remember('assistant', answer);
+            chromaAdd('aikon_os', { insight: `[phone] Q:${text.substring(0,80)} A:${answer.substring(0,200)}`, source: 'phone_cmd' });
+            // Push answer back to phone on the main outbound topic
+            if (CONFIG.ntfyTopic) {
+              await notify(`Commander [${provider}]`, answer.substring(0, 400), 'default');
+            }
+          }
+        } catch(e) { /* malformed line — skip */ }
+      }
+    } catch(e) {
+      // Silent — don't spam logs on intermittent network errors
+      if (!e.message.includes('timeout') && !e.message.includes('ENOTFOUND')) {
+        log(`PHONE-POLL ERR: ${e.message}`);
+      }
+    }
+
+    // Schedule next poll
+    setTimeout(poll, 8000);
+  }
+
+  // Start after 20s (let system settle)
+  setTimeout(poll, 20000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ─── KNOWLEDGE SEEDING v3.19 ─────────────────────────────────────────────────
 // Seeds 40 deep knowledge entries into ChromaDB on startup.
 // These are permanent facts Commander retrieves via RAG to answer questions
@@ -4395,6 +4508,12 @@ async function main() {
   setInterval(() => autonomousHealthCheck().catch(e => log(`HEALTH ERR: ${e.message}`)), 300000);
   setTimeout(() => autonomousHealthCheck().catch(e => log(`HEALTH ERR: ${e.message}`)), 15000);
   log('HEALTH MONITOR v3.20: active — 5-min checks, ntfy alerts enabled');
+
+  // ── PHONE LISTENER v3.21 ──────────────────────────────────────────────────
+  // Always-on background poll of ntfy topic — Al iKon sends commands from
+  // phone, Commander executes them. Approvals, /claude, any slash command.
+  // Uses a separate ntfy SUB topic so push alerts don't loop back as commands.
+  startPhoneListener(rl);
 
   // ── ANTI-HACKING ENGINE v3.15 ─────────────────────────────────────────────
   // S-17: Watchdog heartbeat every 30s
