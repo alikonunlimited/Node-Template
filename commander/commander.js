@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.27 — runTeam uses askAI fallback chain, no hard Ollama dependency:
+// AIKON-OS Commander v3.28 — Ollama timeout 12s (fail-fast to Groq), swap on E: drive:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.27',
+  version:       '3.28',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -1760,7 +1760,7 @@ Active Branch: ${BRANCHES[branch]?.name || branch}${chromaContext}`
       hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
       path: '/api/chat', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 120000
+      timeout: 12000  // 12s — fail fast so Groq/cloud fallback kicks in quickly
     }, res => {
       let d = '';
       res.on('data', c => d += c);
@@ -2486,7 +2486,7 @@ async function teamLLM(prompt, label) {
         hostname: CONFIG.ollamaHost, port: CONFIG.ollamaPort,
         path: '/api/chat', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 300000, // 5 min — social content generation can be slow on 8GB
+        timeout: 12000, // 12s — fail fast, let askAI chain handle fallback to Groq
       }, res => {
         let d = '';
         res.on('data', c => d += c);
