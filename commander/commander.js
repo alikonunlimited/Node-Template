@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.22 — Anti-Hacking Security Layer S-11–S-20:
+// AIKON-OS Commander v3.23 — Movement Learning: observes Al iKon activity, learns patterns:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -131,6 +131,19 @@ const CONFIG = {
   },
   // Approval queue — big decisions wait here
   pendingApprovals: [],
+  // ── MOVEMENT LEARNING ─────────────────────────────────────────────────────
+  // Commander observes Al iKon's activity patterns to learn timing, preferences,
+  // and decision style. Used to anticipate needs and time autonomous actions.
+  movement: {
+    file:         path.join('D:\\AIKON-OS', 'memory', 'movement.json'),
+    sessions:     [],       // { ts, hour, day, action, context, duration }
+    hourlyActive: Array(24).fill(0),  // activity count per hour of day
+    dailyActive:  Array(7).fill(0),   // activity count per day of week
+    decisionLog:  [],       // { ts, type, approved, timeToDecide }
+    lastSeen:     null,     // last phone/terminal activity timestamp
+    awayThreshMs: 1800000,  // 30min without activity = away
+    patterns:     {},       // learned: peak hours, avg decision time, etc.
+  },
   deepseekReady: false,
   // ── SECURITY PROTOCOL LAYER ────────────────────────────────────────────────
   security: {
@@ -1431,7 +1444,7 @@ async function autonomousLoop() {
 // ─── APPROVAL QUEUE ───────────────────────────────────────────────────────────
 function queueApproval(action, details, executeFn) {
   const id = Date.now();
-  CONFIG.pendingApprovals.push({ id, action, details, executeFn, ts: new Date().toISOString() });
+  CONFIG.pendingApprovals.push({ id, action, details, executeFn, ts: new Date().toISOString(), queuedAt: Date.now() });
   print(`\n⚠️  APPROVAL NEEDED [#${id}]:`);
   print(`   Action:  ${action}`);
   print(`   Details: ${details}`);
@@ -3089,8 +3102,10 @@ async function handleCommand(input, rl) {
       const idx = CONFIG.pendingApprovals.findIndex(a => a.id === id);
       if (idx === -1) { print(`❌ No pending approval #${id}`); break; }
       const approval = CONFIG.pendingApprovals.splice(idx, 1)[0];
+      const approveDecideMs = approval.queuedAt ? Date.now() - approval.queuedAt : null;
       print(`✅ Approved: ${approval.action}`);
       log(`APPROVAL: approved [${id}] ${approval.action}`);
+      movementRecordDecision(approval.action.substring(0,60), true, approveDecideMs);
       chromaAdd('aikon_os', { insight: `Approved: ${approval.action} — ${approval.details}` });
       try { await approval.executeFn(); } catch(e) { print(`❌ Execution failed: ${e.message}`); }
       break;
@@ -3101,8 +3116,10 @@ async function handleCommand(input, rl) {
       const idx = CONFIG.pendingApprovals.findIndex(a => a.id === id);
       if (idx === -1) { print(`❌ No pending approval #${id}`); break; }
       const approval = CONFIG.pendingApprovals.splice(idx, 1)[0];
+      const denyDecideMs = approval.queuedAt ? Date.now() - approval.queuedAt : null;
       print(`🚫 Denied: ${approval.action}`);
       log(`APPROVAL: denied [${id}] ${approval.action}`);
+      movementRecordDecision(approval.action.substring(0,60), false, denyDecideMs);
       break;
     }
 
@@ -4204,6 +4221,122 @@ async function backgroundStartup() {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
+// ─── MOVEMENT LEARNING v3.22 ─────────────────────────────────────────────────
+// Commander observes Al iKon's activity — when he's active, what he approves,
+// how fast he decides — and builds a behavioral model. Used to:
+//   - Time autonomous tasks during his active hours (not 3am)
+//   - Predict when he'll be available for approvals
+//   - Learn what kinds of things he auto-approves vs reviews carefully
+//   - Alert when he goes dark longer than usual (might need help)
+// ═══════════════════════════════════════════════════════════════════════════════
+function movementRecord(action, context = '') {
+  const now    = new Date();
+  const mv     = CONFIG.movement;
+  const hour   = now.getHours();
+  const day    = now.getDay();
+
+  mv.lastSeen  = Date.now();
+  mv.hourlyActive[hour]++;
+  mv.dailyActive[day]++;
+  mv.sessions.push({ ts: now.toISOString(), hour, day, action, context: context.substring(0,100) });
+  if (mv.sessions.length > 500) mv.sessions = mv.sessions.slice(-500);
+
+  // Persist to file
+  try {
+    fs.writeFileSync(mv.file, JSON.stringify({
+      hourlyActive: mv.hourlyActive,
+      dailyActive:  mv.dailyActive,
+      sessions:     mv.sessions.slice(-200),
+      patterns:     mv.patterns,
+      lastSeen:     mv.lastSeen,
+    }, null, 2));
+  } catch(e) { /* silent */ }
+
+  // Update patterns after every 10 recordings
+  if (mv.sessions.length % 10 === 0) movementLearnPatterns();
+}
+
+function movementLearnPatterns() {
+  const mv = CONFIG.movement;
+  const h  = mv.hourlyActive;
+  const d  = mv.dailyActive;
+
+  // Peak hours (top 3 by activity)
+  const peakHours = h.map((c,i) => ({h:i,c})).sort((a,b)=>b.c-a.c).slice(0,3).map(x=>x.h);
+
+  // Most active day
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const peakDay = days[d.indexOf(Math.max(...d))];
+
+  // Average time between sessions
+  const gaps = mv.sessions.slice(-20).reduce((acc, s, i, arr) => {
+    if (i === 0) return acc;
+    const gap = new Date(s.ts) - new Date(arr[i-1].ts);
+    if (gap < 3600000) acc.push(gap); // only gaps < 1hr (same session)
+    return acc;
+  }, []);
+  const avgSessionGap = gaps.length ? Math.round(gaps.reduce((a,b)=>a+b,0)/gaps.length/1000) : null;
+
+  // Decision speed — how fast approvals come in
+  const decisions = mv.decisionLog.slice(-10);
+  const avgDecisionMs = decisions.length
+    ? decisions.reduce((a,b)=>a+(b.timeToDecide||0),0)/decisions.length
+    : null;
+  const approvalRate = decisions.length
+    ? (decisions.filter(d=>d.approved).length / decisions.length * 100).toFixed(0)
+    : null;
+
+  mv.patterns = {
+    peakHours,
+    peakDay,
+    avgSessionGapSec: avgSessionGap,
+    avgDecisionSec:   avgDecisionMs ? Math.round(avgDecisionMs/1000) : null,
+    approvalRate:     approvalRate ? `${approvalRate}%` : null,
+    totalSessions:    mv.sessions.length,
+    lastUpdated:      new Date().toISOString(),
+  };
+
+  log(`MOVEMENT: patterns updated — peak hours ${peakHours.join(',')} | peak day ${peakDay} | approval rate ${approvalRate??'unknown'}%`);
+  chromaAdd('aikon_os', {
+    insight: `Al iKon activity pattern: peak hours=${peakHours.map(h=>`${h}:00`).join(',')} | peak day=${peakDay} | approval rate=${approvalRate??'?'}% | avg decision=${mv.patterns.avgDecisionSec??'?'}s`,
+    source: 'movement_learning',
+  });
+}
+
+function movementRecordDecision(type, approved, timeToDecideMs) {
+  const mv = CONFIG.movement;
+  mv.decisionLog.push({ ts: new Date().toISOString(), type, approved, timeToDecide: timeToDecideMs });
+  if (mv.decisionLog.length > 100) mv.decisionLog = mv.decisionLog.slice(-100);
+  movementRecord('decision', `${type}:${approved?'approved':'denied'}`);
+}
+
+function movementIsActive() {
+  // Returns true if Al iKon has been seen in the last 30 min
+  return CONFIG.movement.lastSeen && (Date.now() - CONFIG.movement.lastSeen) < CONFIG.movement.awayThreshMs;
+}
+
+function movementIsLikelyAwake() {
+  // Returns true if current hour matches Al iKon's peak activity hours
+  const hour = new Date().getHours();
+  return CONFIG.movement.patterns.peakHours?.includes(hour) ?? (hour >= 8 && hour <= 23);
+}
+
+function movementLoadHistory() {
+  try {
+    const mv = CONFIG.movement;
+    if (!fs.existsSync(mv.file)) return;
+    const saved = JSON.parse(fs.readFileSync(mv.file, 'utf8'));
+    if (saved.hourlyActive) mv.hourlyActive = saved.hourlyActive;
+    if (saved.dailyActive)  mv.dailyActive  = saved.dailyActive;
+    if (saved.sessions)     mv.sessions     = saved.sessions;
+    if (saved.patterns)     mv.patterns     = saved.patterns;
+    if (saved.lastSeen)     mv.lastSeen     = saved.lastSeen;
+    log(`MOVEMENT: loaded ${mv.sessions.length} sessions from history`);
+    movementLearnPatterns();
+  } catch(e) { log(`MOVEMENT: could not load history — ${e.message}`); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ─── UNIVERSAL AI CALL v3.21 — provider fallback chain ───────────────────────
 // askAI(prompt, systemPrompt, maxTokens) tries providers in order:
 //   1. Ollama (local, free, fastest — phi3:mini)
@@ -4314,6 +4447,7 @@ function startPhoneListener(rl) {
           const text = msg.message.trim();
           log(`PHONE: received "${text.substring(0, 80)}"`);
           print(`\n📱 Phone → "${text}"`);
+          movementRecord('phone_cmd', text.substring(0, 80));
 
           if (text.startsWith('/')) {
             // Slash command — execute directly
@@ -4495,6 +4629,16 @@ async function main() {
   // Run first self-ask after 90s
   setTimeout(() => autonomousSelfAsk(), 90000);
   log('AUTONOMY: v3.14 engine started — self-directed AI learning active');
+
+  // ── MOVEMENT LEARNING v3.23 ──────────────────────────────────────────────
+  // Loads Al iKon's historical activity from D: drive, synthesizes patterns,
+  // and starts observing phone commands / approvals to learn behavior over time.
+  movementLoadHistory();
+  // Synthesize patterns daily at 4am (quiet hour — no active session noise)
+  setInterval(() => {
+    const h = new Date().getHours();
+    if (h === 4) movementLearnPatterns();
+  }, 3600000); // check hourly
 
   // ── KNOWLEDGE SEEDING v3.19 ───────────────────────────────────────────────
   // 40 deep knowledge seeds injected into ChromaDB on startup.
