@@ -238,12 +238,57 @@ const CONFIG = {
     ],
     // Questions Commander asks itself autonomously
     selfAskTopics: [
-      'What patterns in XAU/USD trading should I watch for?',
-      'What opportunities exist across all AIKON-OS business branches?',
-      'What security threats should I be aware of based on recent activity?',
-      'What should Al iKon prioritize today based on current system state?',
-      'Are there any anomalies or risks in the current trading session?',
-      'What can AIKON-OS improve to generate more revenue opportunities?',
+      // ── 20 FROM CLAUDE (deep reasoning, business-specific) ──────────────────
+      // XAU/USD Trader
+      'The XAU/USD trader has a 25% win rate and scalp-only mode. What specific entry filter changes would raise win rate above 40%?',
+      'The trader fires low-confidence scalps at 45% confidence with RSI 95 overbought. What minimum confidence floor and RSI gate would prevent these bad entries?',
+      'HTF conflict (H1/H4 bullish, D1 bearish) locks out swing/day/intraday modes. How should Commander auto-detect and report HTF conflict to Al iKon each session?',
+      'The FundedNext Step 2 account has a 3% daily loss limit ($150/day) and $4,600 max loss floor. How should Commander auto-pause the trader when daily loss hits $120 as a buffer?',
+      'XAU/USD scalp trades lose 75% of the time. What 3 technical conditions (RSI, spread, session time) should ALL be met before any scalp entry fires?',
+      // Silent Santa Roblox
+      'Silent Santa has gamepasses (Golden Sleigh 75R$, Nice List Plus 150R$) and an ad campaign live. What daily metrics should Commander pull from Roblox Analytics and report to Al iKon?',
+      'Silent Santa needs a leaderboard and cosmetic items added this week. Break this into the 3 smallest Luau script changes that deliver visible player-facing value fastest.',
+      'Roblox holiday traffic peaks Christmas week. What retention mechanic (login streak, daily gift, limited event) would have the highest impact on D1/D7 retention for Silent Santa?',
+      'Silent Santa runs ads targeting All Players. What audience split test (All vs Under-13 vs 13-17) would reveal the best-converting segment for Christmas game marketing?',
+      'The belief meter in Silent Santa makes reindeer faster with good play. How should Commander monitor Roblox visit count and avg session length daily and alert when either drops 20%?',
+      // StreamNet / OnAir Network
+      'The Instagram post pipeline uses IG_ONAIR_TOKEN for onairnetwork_inc. What 3-step daily content schedule (post type, time, caption formula) maximizes Reel reach for a streaming hub?',
+      'The alikon_marketing IG account has no token yet. What is the fastest path to get a Page Access Token for it using the existing Meta App setup?',
+      'StreamNet is a Twitch/YouTube hub. What automated clip-surfacing workflow (pull top clip → post to IG Reels → log engagement) can Commander run daily with zero manual steps?',
+      // Restaurant Web Agency
+      'The restaurant web agency targets Columbus-area restaurants. What 5 outreach signals (new Google Maps listing, Yelp review surge, no website, low star rating, holiday hours posted) indicate a hot prospect Commander should alert Al iKon about?',
+      'Restaurant websites need recurring revenue. What service tier (hosting + updates + social posts for $99/mo) could Commander auto-invoice and track via Google Sheets with no manual work?',
+      // Cross-business systems
+      'Al iKon has 8GB RAM on Thomas and runs Ollama. What RAM allocation rule (Ollama cap, Commander limit, OS reserve) keeps the system stable under full load without swapping?',
+      'Commander needs to push notifications to Al iKon\'s phone via ntfy.sh. What 5 event types (trade loss streak, Roblox visit drop, IG post failure, Brain down, daily report ready) should trigger a push?',
+      'The autonomous loop runs every 15 minutes. What lightweight health check (trader ping, Brain ping, Roblox analytics pull, IG token validity) should run every loop without overloading Thomas?',
+      'Commander has a decision queue for actions needing Al iKon sign-off. What 4 categories of decisions (spend money, push code, post publicly, contact a business) should always require approval before executing?',
+      'AIKON-OS has ChromaDB for vector memory. What tagging schema (branch, source, confidence, date, outcome) on each chromaAdd call makes future semantic queries most accurate and useful?',
+      // ── 20 FROM EXTERNAL SOURCES (live systems, public knowledge) ───────────
+      // Trading mechanics (public knowledge)
+      'What is the RSI divergence pattern on XAU/USD and how is it identified on a 15-minute chart when price makes a higher high but RSI makes a lower high?',
+      'What are the three London session time windows (pre-open, open, close) in UTC, and why does XAU/USD volatility typically spike at each one?',
+      'What is the difference between a scalp trade (target <10 pips) and an intraday trade (target 20-50 pips) in terms of stop loss placement on XAU/USD?',
+      'What are the key US economic news events (NFP, CPI, FOMC) that cause XAU/USD spreads to widen, and what is the safest rule for avoiding trades 5 minutes before each?',
+      'What is a prop firm funded account daily drawdown rule and how does a 3% daily loss limit work on a $5,000 account with a $10,000 starting balance?',
+      // Roblox game development (public knowledge)
+      'What is the Roblox DataStore API and how does a Luau script save and load a player\'s coin balance across sessions using DataStoreService:GetDataStore()?',
+      'What is Roblox\'s PlayerAdded event and how should a game script use it to initialize a new player\'s stats (health, coins, level) when they join a server?',
+      'What are the top 3 Roblox monetization methods (gamepasses, developer products, subscriptions) and what is the Robux-to-USD conversion rate developers receive after Roblox\'s 30% cut?',
+      'What is Roblox\'s Creator Hub analytics dashboard and what 5 metrics (visits, playtime, revenue, DAU, retention) should a game developer check daily to judge a game\'s health?',
+      'What is the Roblox TweenService and how is it used to smoothly animate a part moving from position A to position B over 2 seconds in Luau?',
+      // Instagram / Meta Graph API (public knowledge)
+      'What is the difference between a Facebook Page Access Token and a User Access Token in the Meta Graph API, and why does Instagram posting require a Page token?',
+      'What is the Meta Graph API endpoint for creating an Instagram Reel media container, and what fields (video_url, caption, media_type) are required in the POST request?',
+      'What is the Instagram Graph API rate limit for media publishing, and how many posts per 24-hour period can a Business account publish via the API before hitting the limit?',
+      'What is the best caption formula for an Instagram Reel from a streaming/gaming hub account to maximize reach: hook length, hashtag count, and CTA placement?',
+      'What is Meta\'s webhook system for Instagram and how can Commander subscribe to get notified when a Reel is published, liked, or commented on without polling?',
+      // Node.js / system skills (public knowledge)
+      'What is the Node.js child_process spawn vs exec difference, and when should Commander use spawn (long-running process) vs exec (one-shot command) for running shell tasks?',
+      'What is the ntfy.sh API and how does a Node.js script send a push notification to a topic using a simple HTTP POST with a text body and priority header?',
+      'What is SQLite\'s WAL (Write-Ahead Logging) mode and how does enabling it with PRAGMA journal_mode=WAL improve concurrent read/write performance for Commander\'s memory.json replacement?',
+      'What is the Windows Task Scheduler schtasks command syntax to check if a task is running, start it manually, and delete it, using the task name "AIKON-OS Commander"?',
+      'What is an exponential backoff retry pattern in Node.js and how should Commander implement it when retrying a failed Brain relay connection (1s, 2s, 4s, 8s, max 60s)?',
     ],
     topicIndex: 0,
   },
@@ -4080,6 +4125,85 @@ async function backgroundStartup() {
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── KNOWLEDGE SEEDING v3.19 ─────────────────────────────────────────────────
+// Seeds 40 deep knowledge entries into ChromaDB on startup.
+// These are permanent facts Commander retrieves via RAG to answer questions
+// and make better autonomous decisions. Skip entries already seeded.
+// ═══════════════════════════════════════════════════════════════════════════════
+function seedKnowledgeBase() {
+  const seeds = [
+    // ── 20 FROM CLAUDE (business-specific deep reasoning) ──────────────────
+    // XAU/USD Trader
+    { branch: 'trader', source: 'claude_seed', insight: 'XAU/USD entry filter: only enter scalp when RSI is between 40-60 (not overbought/oversold), spread is under 0.30 pips, and time is within 30min of London open (08:00 UTC) or NY open (13:00 UTC). Confidence floor: 60% minimum. This eliminates the RSI-95 overbought scalps that have been causing losses.' },
+    { branch: 'trader', source: 'claude_seed', insight: 'HTF conflict detection rule: if H1/H4 disagree with D1 on trend direction, set htfConflicted=true and block ALL modes except scalp with confidence>70%. Log conflict to daily report. Alert Al iKon if conflict persists >4 hours — may indicate major news event approaching.' },
+    { branch: 'trader', source: 'claude_seed', insight: 'FundedNext Step 2 daily loss buffer: auto-pause trader when daily P&L hits -$120 (not -$150 limit). This leaves $30 buffer against spread costs on open trades. Resume next trading day at 00:00 UTC. Log pause event with reason to Google Sheets.' },
+    { branch: 'trader', source: 'claude_seed', insight: 'Win rate math: at 25% win rate, the system needs reward:risk > 3:1 to be profitable (25%×3 - 75%×1 = 0). Current scalp R:R is likely 1:1. Either raise win rate to 40%+ or raise R:R to 2:1+ minimum. Both changes together are ideal.' },
+    { branch: 'trader', source: 'claude_seed', insight: 'Trader health check protocol: Commander should ping /api/state every 5 minutes during London and NY sessions (08:00-17:00 UTC). If no response in 60s, alert via ntfy.sh. If win rate drops below 20% in a session, auto-pause and alert Al iKon.' },
+    // Silent Santa
+    { branch: 'roblox', source: 'claude_seed', insight: 'Silent Santa daily metrics to pull from Roblox Analytics: (1) Visit count vs yesterday, (2) Avg session length, (3) Gamepass revenue (Golden Sleigh + Nice List Plus), (4) DAU trend, (5) Top referral source. Alert Al iKon if visits drop >20% day-over-day during Christmas season.' },
+    { branch: 'roblox', source: 'claude_seed', insight: 'Silent Santa retention mechanic priority: Daily Gift login bonus is fastest to implement (2 Luau lines) and highest D1 retention impact. Give players a gift box each day they log in — escalating rewards (coins, cosmetics, speed boost). Christmas countdown timer on-screen also drives urgency and return visits.' },
+    { branch: 'roblox', source: 'claude_seed', insight: 'Silent Santa ad audience split: Run 3 ad sets simultaneously — All Players (control), Age 9-12 (Christmas sweet spot), and Age 13-17 (may prefer the competitive leaderboard angle). Compare CTR and visit conversion after 48 hours. Pause the lowest performer, double budget on winner.' },
+    { branch: 'roblox', source: 'claude_seed', insight: 'Silent Santa monetization expansion: Add a "Reindeer Upgrade" developer product (10R$ one-time per upgrade, stackable 5 times) for speed boosts. Developer products convert better than gamepasses for price-sensitive players. Implement with MarketplaceService:PromptProductPurchase().' },
+    { branch: 'roblox', source: 'claude_seed', insight: 'Roblox holiday traffic window: Christmas games peak Dec 20-Jan 1. Silent Santa should have leaderboard + at least 1 new cosmetic live by Dec 18 to capture early holiday players. After Jan 2, traffic drops 60-80%. Plan next seasonal game (Valentine\'s, Easter) now.' },
+    // StreamNet / Social
+    { branch: 'social', source: 'claude_seed', insight: 'OnAir Network IG Reel formula: Hook (0-3s): bold text overlay + audio. Content (3-20s): clip highlight or screen recording. CTA (last 3s): "Follow for more streams". Caption: 1 sentence + 3-5 niche hashtags (#twitchclips #livestreaming #streamhighlights). Post Tue-Thu 12-3pm EST for max reach.' },
+    { branch: 'social', source: 'claude_seed', insight: 'alikon_marketing IG token path: In Meta Developer App 1174505231754866, go to Graph API Explorer → select alikon_marketing Facebook Page from me/accounts → copy that Page\'s access_token → save as IG_ALIKON_TOKEN in .env. Required permissions: instagram_basic, instagram_content_publish, pages_read_engagement.' },
+    { branch: 'social', source: 'claude_seed', insight: 'Daily auto-post workflow for onairnetwork_inc: (1) Commander pulls top Twitch clip via Twitch API /helix/clips, (2) downloads MP4 to Oracle /temp/ dir, (3) posts public URL to IG /reels endpoint with auto-generated caption, (4) logs result to Chroma. Full loop should run at 2pm EST daily.' },
+    // Restaurant Agency
+    { branch: 'opportunities', source: 'claude_seed', insight: 'Restaurant prospect signals Commander should monitor daily via Google Maps API and DuckDuckGo: (1) New restaurant listing in Columbus with no website URL, (2) Restaurant with <3.5 stars and >50 reviews, (3) Restaurant with outdated hours posted, (4) Local food blog mentioning a restaurant with no social link. Alert Al iKon with business name + phone.' },
+    { branch: 'opportunities', source: 'claude_seed', insight: 'Restaurant agency pricing that works: Tier 1 = Website build $499 one-time + $99/mo hosting/updates. Tier 2 = $99/mo + $149/mo social (3 IG posts/week). Tier 3 = Full service $349/mo. Lead with Tier 1 — lowest barrier. Upsell to Tier 2 after 60 days. Commander tracks client list and billing in Google Sheets.' },
+    // Systems
+    { branch: 'aikon_os', source: 'claude_seed', insight: 'Thomas RAM allocation rule: Ollama max 3GB (set via OLLAMA_MAX_LOADED_MODELS=1 and keep_alive=0 on every call). Commander Node.js process target <500MB. Leave 4GB+ for Windows OS and other processes. If RAM >90%, Commander should auto-kill Ollama (taskkill /F /IM ollama.exe) and use Claude API fallback.' },
+    { branch: 'aikon_os', source: 'claude_seed', insight: 'ntfy.sh push notification events Commander should send: (1) Trader daily loss >$100 — URGENT, (2) Roblox visit count drops >20% — WARNING, (3) IG post failure — INFO, (4) Brain relay down >5min — WARNING, (5) Daily autonomous report ready — INFO, (6) FundedNext account paused — URGENT. Topic: set NTFY_TOPIC in .env.' },
+    { branch: 'aikon_os', source: 'claude_seed', insight: 'Autonomous loop health check per tick: ping trader /api/state (200ms timeout), ping Brain /relay/status (200ms timeout), check Ollama process running (tasklist grep), verify .env file exists, check commander.log for ERROR lines in last 15min. Log all results. Alert on any failure.' },
+    { branch: 'aikon_os', source: 'claude_seed', insight: 'Decision approval categories — always queue for Al iKon sign-off, never auto-execute: (1) Any spend >$0 (ad budget, API upgrade), (2) Pushing code to production repos, (3) Sending messages/emails as Al iKon, (4) Contacting any external business or person. Auto-execute OK: internal reports, memory writes, local file changes, read-only API calls.' },
+    { branch: 'aikon_os', source: 'claude_seed', insight: 'ChromaDB tagging schema for high-quality RAG retrieval: every chromaAdd entry should include: branch (trader/roblox/social/opportunities/aikon_os), source (feed/self_ask/claude_seed/decision_log/daily_report), confidence (high/medium/low), outcome if applicable (profit/loss/viral/ignored). This lets Commander filter by confidence and outcome in future queries.' },
+    // ── 20 FROM EXTERNAL/PUBLIC KNOWLEDGE ──────────────────────────────────
+    // Trading mechanics
+    { branch: 'trader', source: 'external_knowledge', insight: 'RSI divergence on XAU/USD 15min chart: Bullish divergence = price makes lower low, RSI makes higher low — signals potential reversal up. Bearish divergence = price makes higher high, RSI makes lower high — signals potential reversal down. Only trade divergence with HTF trend confirmation. Never trade divergence against D1 trend.' },
+    { branch: 'trader', source: 'external_knowledge', insight: 'XAU/USD London session windows (UTC): Pre-open 06:00-07:00 (quiet, set bias), Open 07:00-09:00 (high volatility, best breakout entries), Mid-session 09:00-11:00 (trend continuation), Close 11:00-12:00 (reversals common). NY Open 13:30-15:00 (second major volatility window). Avoid trading 12:00-13:00 UTC (dead zone).' },
+    { branch: 'trader', source: 'external_knowledge', insight: 'XAU/USD news avoidance rule: Check forexfactory.com or investing.com economic calendar before each session. Events that cause >20 pip moves: NFP (first Friday, 13:30 UTC), CPI (monthly, 13:30 UTC), FOMC (8x/year, 19:00 UTC), Fed Chair speeches. Rule: no new entries 15min before or 15min after red-impact events.' },
+    { branch: 'trader', source: 'external_knowledge', insight: 'Prop firm drawdown math (FundedNext Step 2, $5K account): Max loss floor $4,600 = max $400 total drawdown. Daily loss limit 3% = $150/day. If open trade risks $150, that uses full daily allowance. Best practice: max risk per trade = 0.5% of account = $25/trade. Allows 6 losing trades before daily limit hit.' },
+    { branch: 'trader', source: 'external_knowledge', insight: 'Scalp vs intraday distinction: Scalp = entry to exit <15 minutes, target 5-10 pips, SL 5-8 pips, requires tight spread (<0.30 pips on XAU/USD). Intraday = entry to exit within session, target 20-50 pips, SL 15-25 pips, requires HTF trend confirmation. Swing = multi-day hold, target 100+ pips, requires D1/W1 alignment.' },
+    // Roblox development
+    { branch: 'roblox', source: 'external_knowledge', insight: 'Roblox DataStore save/load pattern: local DataStoreService = game:GetService("DataStoreService"); local store = DataStoreService:GetDataStore("PlayerData"); store:SetAsync(player.UserId, {coins=100, level=1}) to save. store:GetAsync(player.UserId) to load. Always wrap in pcall() to handle errors. Auto-save on PlayerRemoving event.' },
+    { branch: 'roblox', source: 'external_knowledge', insight: 'Roblox PlayerAdded initialization pattern: game.Players.PlayerAdded:Connect(function(player) — load data from DataStore — create leaderstats folder — add IntValue objects (Coins, Level, Deliveries) — set values from loaded data or defaults. Always use pcall around DataStore calls. Set up PlayerRemoving save at same time.' },
+    { branch: 'roblox', source: 'external_knowledge', insight: 'Roblox monetization rates: Gamepass revenue = Robux price × 0.70 (Roblox takes 30%). 1,000 Robux = ~$3.50 USD via DevEx (must be Premium member with 30-day hold). Golden Sleigh at 75R$ = ~$0.26 per purchase after cut. Need ~385 purchases for $100 USD. Focus on volume (many small purchases) not premium pricing.' },
+    { branch: 'roblox', source: 'external_knowledge', insight: 'Roblox Creator Hub daily metrics dashboard: Navigate to create.roblox.com → Creations → [game] → Analytics. Key tabs: Summary (visits, playtime, revenue), Engagement (session length, D1/D7 retention), Acquisition (top referral sources). D7 retention >20% is good for a kids game. Avg session >8 minutes indicates strong engagement.' },
+    { branch: 'roblox', source: 'external_knowledge', insight: 'Roblox TweenService animation: local TweenService = game:GetService("TweenService"); local goal = {Position = Vector3.new(x,y,z)}; local tweenInfo = TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out); local tween = TweenService:Create(part, tweenInfo, goal); tween:Play(). Use for smooth sleigh movement, elf walking, gift box animations.' },
+    // Instagram / Meta API
+    { branch: 'social', source: 'external_knowledge', insight: 'Meta Graph API token types: User Access Token = tied to a person, short-lived (1-2 hours), used for /me endpoint. Page Access Token = tied to a Facebook Page, long-lived (60 days or never-expiring if generated correctly), required for IG Business Account posting. Get Page token via GET /me/accounts?fields=access_token with User token.' },
+    { branch: 'social', source: 'external_knowledge', insight: 'Instagram Reel upload via Graph API: Step 1: POST /{ig-user-id}/media with video_url, caption, media_type=REELS, share_to_feed=true → returns creation_id. Step 2: Wait 10-30s for processing. Step 3: POST /{ig-user-id}/media_publish with creation_id → returns media_id. Check status via GET /{creation_id}?fields=status_code (must be FINISHED before publish).' },
+    { branch: 'social', source: 'external_knowledge', insight: 'Instagram Graph API posting limits: 25 API-published posts per 24-hour rolling window per Instagram account. Reels count toward this limit. Stories have separate limits. Rate limit error code: (#4) Application request limit reached. Best practice: space posts at least 1 hour apart; Commander should track last_post_ts per account in .env or Chroma.' },
+    { branch: 'social', source: 'external_knowledge', insight: 'Instagram Reel caption best practices for gaming/streaming niche: Keep under 125 chars (more shown without "more" truncation). Format: [Hook emoji] [1 punchy line] [line break] [3-5 hashtags]. Best hashtags for streaming: #twitchstreamer #streamhighlights #gamingclips #livestream #contentcreator. Post between 11am-1pm or 7pm-9pm EST for maximum initial reach.' },
+    { branch: 'social', source: 'external_knowledge', insight: 'Meta Webhooks for Instagram: Subscribe to instagram topic via POST /app/subscriptions with fields=comments,messages,messaging_postbacks,feed. Requires a public HTTPS callback URL that returns 200 on GET verification challenge. Brain\'s Railway URL can serve as webhook endpoint. This eliminates polling — Instagram pushes events to Commander in real-time.' },
+    // Node.js / system
+    { branch: 'aikon_os', source: 'external_knowledge', insight: 'Node.js child_process: use spawn() for long-running processes (Ollama, voice recorder) — returns stream, does not buffer output. Use execSync() for one-shot commands that need stdout (git pull, tasklist). use exec() for async one-shot. spawn() with stdio:inherit passes Commander terminal directly to child process — good for Ollama startup.' },
+    { branch: 'aikon_os', source: 'external_knowledge', insight: 'ntfy.sh push notification via Node.js: const https=require("https"); https.request({hostname:"ntfy.sh",path:"/YOUR_TOPIC",method:"POST",headers:{"Title":"Commander Alert","Priority":"high","Content-Type":"text/plain"}},()=>{}).end("Your message here"). Free, no account needed. Set unique topic in NTFY_TOPIC env var to avoid others seeing notifications.' },
+    { branch: 'aikon_os', source: 'external_knowledge', insight: 'SQLite WAL mode enables concurrent reads while writing: run PRAGMA journal_mode=WAL; once after opening DB. For Commander memory, better-sqlite3 is fastest synchronous SQLite for Node.js. Schema: CREATE TABLE memory(id INTEGER PRIMARY KEY, branch TEXT, source TEXT, content TEXT, ts DATETIME DEFAULT CURRENT_TIMESTAMP, confidence TEXT). Index on branch+ts for fast RAG queries.' },
+    { branch: 'aikon_os', source: 'external_knowledge', insight: 'Windows Task Scheduler schtasks commands: Check task: schtasks /query /tn "AIKON-OS Commander" /fo LIST. Start now: schtasks /run /tn "AIKON-OS Commander". Stop: schtasks /end /tn "AIKON-OS Commander". Delete: schtasks /delete /tn "AIKON-OS Commander" /f. Import XML: schtasks /create /xml "path.xml" /tn "AIKON-OS Commander" /f. All require no quotes around /tn on some Windows versions — test both.' },
+    { branch: 'aikon_os', source: 'external_knowledge', insight: 'Exponential backoff retry pattern for Brain relay in Node.js: let attempt=0; async function connect(){try{await tryConnect();}catch(e){const delay=Math.min(1000*Math.pow(2,attempt),60000); attempt++; log("Retry in "+delay+"ms"); setTimeout(connect,delay);}} Reset attempt=0 on success. This prevents hammering Brain when it is redeploying, capping at 60s between retries.' },
+  ];
+
+  let seeded = 0;
+  for (const seed of seeds) {
+    // Check if this exact insight is already in memory (avoid duplicates on restart)
+    const existing = chromaQuery(seed.branch, seed.insight.substring(0, 50), 1);
+    const alreadySeeded = existing.some(e => e.content && e.content.startsWith(seed.insight.substring(0, 40)));
+    if (!alreadySeeded) {
+      chromaAdd(seed.branch, { insight: seed.insight, source: seed.source });
+      seeded++;
+    }
+  }
+  if (seeded > 0) {
+    log(`KNOWLEDGE-SEED: ${seeded} new knowledge entries added to ChromaDB (${seeds.length - seeded} already present)`);
+    print(`📚 Knowledge base updated: ${seeded} new skills/systems seeded into memory`);
+  } else {
+    log('KNOWLEDGE-SEED: all 40 entries already present — skipping');
+  }
+}
+
 async function main() {
   printBanner();
 
@@ -4149,6 +4273,12 @@ async function main() {
   // Run first self-ask after 90s
   setTimeout(() => autonomousSelfAsk(), 90000);
   log('AUTONOMY: v3.14 engine started — self-directed AI learning active');
+
+  // ── KNOWLEDGE SEEDING v3.19 ───────────────────────────────────────────────
+  // 40 deep knowledge seeds injected into ChromaDB on startup.
+  // Commander retrieves these via RAG on every relevant prompt.
+  // 20 from Claude reasoning + 20 from public/external knowledge.
+  setTimeout(() => seedKnowledgeBase(), 5000);
 
   // ── ANTI-HACKING ENGINE v3.15 ─────────────────────────────────────────────
   // S-17: Watchdog heartbeat every 30s
