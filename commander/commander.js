@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIKON-OS Commander v3.24 — Tiered Ollama: Phi-3 fast path, DeepSeek heavy reasoning only:
+// AIKON-OS Commander v3.25 — Grounded /claude: gather→reason→answer, no hallucination:
 //   HMAC signing, replay prevention, rate limiting, IP allowlist, token expiry,
 //   shell whitelist, process watchdog, tamper-evident logs, encrypted backup, kill switch
 // Location: D:\AIKON-OS\commander\commander.js
@@ -69,7 +69,7 @@ const CONFIG = {
   updateRepo:    'alikonunlimited/Node-Template',
   updateFile:    'commander/commander.js',
   updateBranch:  'main',
-  version:       '3.24',
+  version:       '3.25',
   // Voice
   voiceRecorder: path.join(__dirname, 'voice_record.py'),
   voiceWav:      path.join(__dirname, 'voice_input.wav'),
@@ -3770,19 +3770,75 @@ SETUP (one-time):
     case '/claude': {
       if (!args) { print('Usage: /claude <question>'); break; }
       const qId = `q-${Date.now()}`;
+      print(`🤖 Thinking [${qId}]...`);
 
-      // Path 1: askAI chain (Ollama → Groq → OpenRouter → Gemini, auto-fallback)
-      print(`🤖 Asking AI [${qId}]...`);
       try {
-        const kpi = intelUpdateKPI();
-        const systemCtx = `You are advising AIKON-OS Commander (v${CONFIG.version}) for Al iKon (Al iKon Unlimited LLC).
-Current state: Threat=${kpi.threatLevel} | Trader balance=${kpi.traderBalance??'unknown'} | Uptime=${kpi.uptime}
-Active projects: XAU/USD Trader, Silent Santa Roblox, StreamNet, Restaurant Web Agency.
-Be direct, concise, actionable. 3-6 sentences max. This prints in Commander terminal.`;
-        const { text: answer, provider } = await askAI(args, systemCtx, 600);
+        // ── STEP 1: GATHER — pull everything Commander actually knows ──────────
+        const branch   = detectBranch(args);
+        const ragHits  = chromaQuery(branch, args, 5);
+        const kpi      = intelUpdateKPI();
+        const mvActive = movementIsActive();
+        const mvPeak   = movementIsLikelyAwake();
+        const patterns = CONFIG.movement.patterns;
+
+        // Live trader data if relevant
+        let traderCtx = '';
+        if (/trader|xau|gold|trade|position|balance|p&l|win|loss/i.test(args)) {
+          try {
+            const td = await httpGet(`${CONFIG.traderUrl}/status`);
+            traderCtx = `Trader live: balance=$${td?.balance??'?'} | P&L today=$${td?.dailyPL??'?'} | win rate=${td?.winRate??'?'}% | open positions=${td?.openPositions??0}`;
+          } catch(e) { traderCtx = 'Trader: unreachable right now'; }
+        }
+
+        // ── STEP 2: ASSESS — does Commander already have a complete answer? ───
+        const ragSummary = ragHits.length
+          ? ragHits.map((h,i) => `[${i+1}] ${h.content}`).join('\n')
+          : 'No relevant memory found.';
+
+        // If RAG has strong hits and no live data needed, answer directly
+        const hasStrongRAG = ragHits.length >= 3 && !traderCtx;
+        if (hasStrongRAG) {
+          // Compose answer purely from known context — no AI hallucination risk
+          const directAnswer = ragHits.slice(0,3).map(h => h.content).join(' | ');
+          if (directAnswer.length > 80) {
+            print(`\n🧠 [memory]: ${directAnswer.substring(0,500)}\n`);
+            log(`AI-DIRECT [${qId}] via memory-RAG: Q=${args.substring(0,80)}`);
+            chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${directAnswer.substring(0,200)}`, source: 'memory_rag' });
+            break;
+          }
+        }
+
+        // ── STEP 3: REASON — build a focused, grounded prompt for AI ─────────
+        // Commander does NOT send raw questions. It sends what it knows + what it needs.
+        const groundedPrompt = `
+You are Commander's reasoning engine for Al iKon (Al iKon Unlimited LLC).
+Commander has gathered the following verified context. Reason over it — do NOT add unverified facts.
+
+QUESTION: ${args}
+
+WHAT COMMANDER KNOWS:
+${ragSummary}
+${traderCtx ? `\nLIVE SYSTEM DATA:\n${traderCtx}` : ''}
+
+SYSTEM STATE:
+- Commander v${CONFIG.version} | Threat: ${kpi.threatLevel} | Uptime: ${kpi.uptime}
+- Al iKon presence: ${mvActive ? 'ACTIVE (seen recently)' : 'AWAY'}
+- Peak activity window: ${patterns.peakHours ? patterns.peakHours.map(h=>`${h}:00`).join(', ') : 'learning...'}
+- Active projects: XAU/USD Trader, Silent Santa (Roblox), Restaurant Web Agency
+
+INSTRUCTIONS:
+- Answer ONLY from the context above. If the context is insufficient, say exactly what is missing.
+- Do NOT invent strategy, numbers, or facts not present above.
+- Be direct and concise. 3-5 sentences. Terminal output — no markdown.
+- If you cannot give a complete answer, say so and state what data would complete it.`.trim();
+
+        // ── STEP 4: AI CALL — only now, with grounded context ─────────────────
+        const { text: answer, provider } = await askAI(groundedPrompt, '', 700);
+
         print(`\n🤖 [${provider}]: ${answer}\n`);
         log(`AI-DIRECT [${qId}] via ${provider}: Q=${args.substring(0,80)} A=${answer.substring(0,100)}`);
         chromaAdd('aikon_os', { insight: `[/claude] Q:${args.substring(0,100)} A:${answer.substring(0,200)}`, source: `ai_${provider}` });
+
       } catch(e) {
         print(`❌ AI error: ${e.message}`);
         log(`AI-DIRECT-ERR [${qId}]: ${e.message}`);
@@ -3793,16 +3849,6 @@ Be direct, concise, actionable. 3-6 sentences max. This prints in Commander term
             print('  Answer will arrive on next heartbeat tick (~5s)');
           } catch(be) { print(`❌ Brain relay also failed: ${be.message}`); }
         }
-      }
-      break;
-      // Path 2: Brain relay fallback (kept for legacy — normally askAI chain handles everything)
-      if (!CONFIG.brainUrl) { print('❌ No AI providers available and no BRAIN_URL'); break; }
-      print(`📡 Sending to Claude via Brain relay [${qId}]... (answer arrives in ~5s on next heartbeat)`);
-      try {
-        await httpPost(CONFIG.brainUrl.replace(/\/$/, '') + '/relay/claude-ask', { question: args, id: qId }, bridgeHeaders());
-        log(`CLAUDE-ASK-RELAY [${qId}]: ${args}`);
-      } catch(e) {
-        print(`❌ Failed to reach Brain: ${e.message}`);
       }
       break;
     }
